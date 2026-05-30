@@ -1,0 +1,22 @@
+spring:
+  application:
+    name: agent-orchestration
+  # Domain configuration is externalised under ./config (one file per concern), so it can be
+  # edited/overridden at runtime without rebuilding. Marked optional so the app still boots if a
+  # file is absent.
+  config:
+    import:
+      - optional:file:./config/llm.yml
+      - optional:file:./config/agents.yml
+      - optional:file:./config/budgets.yml
+      - optional:file:./config/memory.yml
+      - optional:file:./config/messagebus.yml
+      - optional:file:./config/sandbox.yml
+
+workspace:
+  # Git-backed working directory where agents write code/artifacts.
+  repo-dir: ./data/repo
+
+logging:
+  level:
+    com.orchestration: INFO

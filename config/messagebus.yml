@@ -1,0 +1,6 @@
+# Inter-agent message bus backend (behind the MessageBus interface).
+message-bus:
+  backend: in-memory         # in-memory (v1). redis | kafka are future swap-ins.
+  in-memory:
+    queue-capacity: 1024
+    async: true

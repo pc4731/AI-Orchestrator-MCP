@@ -1,0 +1,4 @@
+# The console demo runs the CommandLineRunner and exits — no web server needed.
+spring:
+  main:
+    web-application-type: none

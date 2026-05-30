@@ -1,0 +1,46 @@
+// Groovy DSL build script (per project decision).
+plugins {
+    id 'java'
+    id 'org.springframework.boot' version '3.3.5'
+    id 'io.spring.dependency-management' version '1.1.6'
+}
+
+group = 'com.orchestration'
+version = '0.1.0-SNAPSHOT'
+
+java {
+    toolchain {
+        // Java 21 (LTS) is mandated by the spec for virtual threads. The foojay resolver in
+        // settings.gradle provisions a matching JDK if the host does not have one.
+        languageVersion = JavaLanguageVersion.of(21)
+    }
+}
+
+repositories {
+    mavenCentral()
+}
+
+dependencies {
+    // Core Spring Boot + web (REST + SSE for the live agent-interaction UI).
+    implementation 'org.springframework.boot:spring-boot-starter'
+    implementation 'org.springframework.boot:spring-boot-starter-web'
+    implementation 'org.springframework.boot:spring-boot-starter-validation'
+
+    // Structured (JSON) agent I/O. Version managed by the Spring Boot BOM.
+    implementation 'com.fasterxml.jackson.core:jackson-databind'
+
+    // Structured memory + checkpoints (SQLite, single-file, behind MemoryStore).
+    implementation 'org.xerial:sqlite-jdbc:3.46.1.3'
+
+    // Git-backed artifact repository (versioned code/doc output, behind ArtifactRepository).
+    implementation 'org.eclipse.jgit:org.eclipse.jgit:6.10.0.202406032230-r'
+
+    // The Anthropic client is a thin custom wrapper over java.net.http (per project decision),
+    // so no third-party SDK dependency is declared here.
+
+    testImplementation 'org.springframework.boot:spring-boot-starter-test'
+}
+
+tasks.named('test') {
+    useJUnitPlatform()
+}

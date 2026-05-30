@@ -1,0 +1,20 @@
+# Build output
+.gradle/
+build/
+!gradle/wrapper/gradle-wrapper.jar
+
+# Runtime data (SQLite db, generated workspaces)
+data/
+*.db
+workspace/
+
+# IDE
+.idea/
+*.iml
+.vscode/
+
+# OS
+.DS_Store
+
+# Secrets
+.env

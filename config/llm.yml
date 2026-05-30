@@ -1,0 +1,23 @@
+# Anthropic Claude API settings for the thin custom LLM client.
+# The client itself wraps java.net.http; everything tunable lives here (nothing hardcoded).
+llm:
+  api:
+    base-url: https://api.anthropic.com
+    anthropic-version: "2023-06-01"
+    # Never commit a key. Supplied via environment variable.
+    api-key: ${ANTHROPIC_API_KEY:}
+    timeout-seconds: 120
+  retry:
+    max-retries: 5
+    initial-backoff-millis: 500
+    max-backoff-millis: 30000
+    # Exponential backoff multiplier between attempts.
+    multiplier: 2.0
+  prompt-cache:
+    # Anthropic prompt caching for stable system prompts / shared context.
+    enabled: true
+  # Named model aliases referenced by agents.yml so model ids live in exactly one place.
+  models:
+    opus: claude-opus-4-8
+    sonnet: claude-sonnet-4-6
+    haiku: claude-haiku-4-5-20251001

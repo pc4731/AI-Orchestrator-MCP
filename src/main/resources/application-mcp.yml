@@ -1,0 +1,8 @@
+# MCP server profile: stdio JSON-RPC, no web server, no API key (Claude Code is the brain).
+spring:
+  main:
+    web-application-type: none
+    banner-mode: "off"
+# stdout is the MCP protocol channel — route all logging to stderr.
+logging:
+  config: classpath:logback-mcp.xml

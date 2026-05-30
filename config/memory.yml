@@ -1,0 +1,12 @@
+# Structured memory + checkpoint backend (behind the MemoryStore interface).
+memory:
+  backend: sqlite            # sqlite (v1). Swappable later without engine changes.
+  sqlite:
+    path: ./data/orchestration.db
+  checkpoint:
+    # Persist full orchestration state after every step so runs resume exactly where they stopped.
+    every-step: true
+  semantic:
+    # Semantic/vector RAG is DEFERRED in v1 -> a no-op SemanticMemory is wired when disabled.
+    enabled: false
+    backend: none            # extension point: pgvector (future)

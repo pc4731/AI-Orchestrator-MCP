@@ -1,0 +1,70 @@
+package com.orchestration.engine;
+
+import com.orchestration.agent.Agent;
+import com.orchestration.agent.AgentFactory;
+import com.orchestration.agent.AgentId;
+import com.orchestration.agent.AgentRole;
+import com.orchestration.agent.Capability;
+import com.orchestration.artifact.JGitArtifactRepository;
+import com.orchestration.audit.InMemoryAuditLog;
+import com.orchestration.task.Task;
+import com.orchestration.task.TaskId;
+import com.orchestration.task.WorkflowState;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
+
+import java.nio.file.Path;
+import java.time.Instant;
+import java.util.List;
+import java.util.Map;
+import java.util.Optional;
+import java.util.Set;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+
+class AgentTaskProcessorTest {
+
+    @TempDir
+    Path repoDir;
+
+    /** A stub agent that returns one code artifact. */
+    private static Agent artifactAgent() {
+        return new Agent() {
+            @Override public AgentId id() { return new AgentId("agent-1"); }
+            @Override public AgentRole role() { return AgentRole.BACKEND_DEVELOPER; }
+            @Override public Set<Capability> capabilities() { return Set.of(Capability.WRITE_CODE); }
+            @Override public boolean canHandle(Task task) { return true; }
+            @Override public Response handle(Request request, Context context) {
+                return new Response(Outcome.COMPLETED,
+                        Map.of("summary", "done"),
+                        List.of(new Artifact("src/A.java", "class A {}", "text/plain")),
+                        Confidence.HIGH, List.of(), Optional.empty());
+            }
+        };
+    }
+
+    private static AgentFactory factoryReturning(Agent agent) {
+        return new AgentFactory() {
+            @Override public Agent create(AgentRole role) { return agent; }
+            @Override public boolean supports(AgentRole role) { return true; }
+            @Override public Set<AgentRole> supportedRoles() { return Set.of(agent.role()); }
+        };
+    }
+
+    @Test
+    void commitsArtifactsAndAuditsTheTask() {
+        JGitArtifactRepository repo = new JGitArtifactRepository(repoDir);
+        InMemoryAuditLog audit = new InMemoryAuditLog();
+        AgentTaskProcessor processor = new AgentTaskProcessor(factoryReturning(artifactAgent()), repo, audit);
+
+        Task task = new Task(new TaskId("t1"), "Implement", "code it", AgentRole.BACKEND_DEVELOPER,
+                WorkflowState.PENDING, List.of(), Map.of(), Instant.now(), Instant.now());
+
+        Agent.Response response = processor.process("p1", task);
+
+        assertEquals(Agent.Outcome.COMPLETED, response.outcome());
+        assertEquals("class A {}", repo.read("src/A.java").orElseThrow());
+        assertFalse(audit.forTask("t1").isEmpty());
+    }
+}

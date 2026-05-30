@@ -1,0 +1,75 @@
+# Per-agent configuration. Model assignment is configurable here and NEVER hardcoded.
+# `model` accepts a literal model id or one of the aliases defined in llm.yml (opus/sonnet/haiku).
+agents:
+  definitions:
+    team-lead:
+      role: TEAM_LEAD
+      model: opus
+      prompt-file: prompts/team-lead.md
+      capabilities: [CLARIFY_REQUIREMENTS, DECOMPOSE_TASKS]
+      max-output-tokens: 4096
+      temperature: 0.2
+
+    backend-architect:
+      role: BACKEND_ARCHITECT
+      model: opus
+      prompt-file: prompts/backend-architect.md
+      capabilities: [DESIGN_ARCHITECTURE]
+      max-output-tokens: 8192
+      temperature: 0.2
+
+    frontend-architect:
+      role: FRONTEND_ARCHITECT
+      model: opus
+      prompt-file: prompts/frontend-architect.md
+      capabilities: [DESIGN_ARCHITECTURE]
+      max-output-tokens: 8192
+      temperature: 0.2
+
+    ui-designer:
+      role: UI_DESIGNER
+      model: sonnet
+      prompt-file: prompts/ui-designer.md
+      capabilities: [DESIGN_UI]
+      max-output-tokens: 4096
+      temperature: 0.4
+
+    backend-developer:
+      role: BACKEND_DEVELOPER
+      model: sonnet            # Opus/Sonnet configurable — switch here per cost/quality needs.
+      prompt-file: prompts/backend-developer.md
+      capabilities: [WRITE_CODE, EXECUTE_TOOLS]
+      max-output-tokens: 8192
+      temperature: 0.1
+
+    frontend-developer:
+      role: FRONTEND_DEVELOPER
+      model: sonnet
+      prompt-file: prompts/frontend-developer.md
+      capabilities: [WRITE_CODE, EXECUTE_TOOLS]
+      max-output-tokens: 8192
+      temperature: 0.1
+
+    qa-engineer:
+      role: QA_ENGINEER
+      model: sonnet
+      prompt-file: prompts/qa-engineer.md
+      capabilities: [RUN_TESTS, REVIEW_CODE, EXECUTE_TOOLS]
+      max-output-tokens: 4096
+      temperature: 0.2
+
+    dba:
+      role: DBA
+      model: opus
+      prompt-file: prompts/dba.md
+      capabilities: [DESIGN_SCHEMA]
+      max-output-tokens: 4096
+      temperature: 0.2
+
+    security-reviewer:
+      role: SECURITY_REVIEWER
+      model: opus
+      prompt-file: prompts/security-reviewer.md
+      capabilities: [SECURITY_AUDIT, REVIEW_CODE]
+      max-output-tokens: 4096
+      temperature: 0.1

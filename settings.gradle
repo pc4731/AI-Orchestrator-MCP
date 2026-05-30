@@ -1,0 +1,15 @@
+// Groovy DSL (per project decision).
+pluginManagement {
+    repositories {
+        gradlePluginPortal()
+        mavenCentral()
+    }
+}
+
+plugins {
+    // Lets the Gradle Java toolchain auto-download JDK 21 even when the host only has JDK 17,
+    // so we can target Java 21 (required for virtual threads) without a manual JDK install.
+    id 'org.gradle.toolchains.foojay-resolver-convention' version '0.8.0'
+}
+
+rootProject.name = 'agent-orchestration'

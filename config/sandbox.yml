@@ -1,0 +1,15 @@
+# Sandboxed tool execution (behind the ToolExecutor interface).
+# All agent commands (compile/build/run/test) run inside a container — never against the host.
+sandbox:
+  enabled: true
+  type: docker
+  docker:
+    image: eclipse-temurin:21-jdk
+    network: none            # no network access from inside the sandbox by default
+    cpu-limit: "2"
+    memory-limit: 2g
+    workdir: /workspace
+    read-only-root: true
+    timeout-seconds: 600
+  # Commands an agent is permitted to invoke inside the sandbox.
+  allowed-commands: [./gradlew, gradle, mvn, java, javac, node, npm, npx, pytest, python]

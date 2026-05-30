@@ -1,0 +1,149 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>AI Agent Orchestration — Live</title>
+<style>
+  :root { --bg:#0f1320; --panel:#171c2e; --line:#2a3350; --txt:#e6e9f2; --muted:#9aa3bd; }
+  * { box-sizing: border-box; }
+  body { margin:0; font:14px/1.5 system-ui,Segoe UI,Roboto,sans-serif; background:var(--bg); color:var(--txt); }
+  header { padding:16px 22px; border-bottom:1px solid var(--line); }
+  header h1 { margin:0; font-size:18px; }
+  header p { margin:4px 0 0; color:var(--muted); font-size:12px; }
+  .bar { display:flex; gap:8px; padding:14px 22px; border-bottom:1px solid var(--line); }
+  .bar input { flex:1; padding:9px 12px; border-radius:8px; border:1px solid var(--line); background:#0c1020; color:var(--txt); }
+  .bar button { padding:9px 16px; border:0; border-radius:8px; background:#3b6cf6; color:#fff; font-weight:600; cursor:pointer; }
+  .bar button:disabled { opacity:.5; cursor:default; }
+  .status { padding:10px 22px; color:var(--muted); border-bottom:1px solid var(--line); font-size:13px; }
+  .status b { color:var(--txt); }
+  .grid { display:grid; grid-template-columns: 1fr 1fr; gap:0; height: calc(100vh - 190px); }
+  .col { padding:16px 22px; overflow:auto; }
+  .col + .col { border-left:1px solid var(--line); }
+  h2 { font-size:12px; text-transform:uppercase; letter-spacing:.08em; color:var(--muted); margin:0 0 12px; }
+  .task { background:var(--panel); border:1px solid var(--line); border-left:4px solid var(--muted); border-radius:8px; padding:10px 12px; margin-bottom:10px; }
+  .task .t { font-weight:600; }
+  .task .r { color:var(--muted); font-size:12px; }
+  .task .dep { color:var(--muted); font-size:11px; margin-top:4px; }
+  .badge { float:right; font-size:11px; padding:2px 8px; border-radius:20px; background:#222a44; }
+  .PENDING { border-left-color:#6b7280; } .PENDING .badge { background:#374151; }
+  .IN_PROGRESS { border-left-color:#e0a800; } .IN_PROGRESS .badge { background:#5c4a00; color:#ffe08a; }
+  .IN_REVIEW { border-left-color:#0d6efd; } .IN_REVIEW .badge { background:#0b3a86; }
+  .NEEDS_CLARIFICATION { border-left-color:#8b5cf6; } .NEEDS_CLARIFICATION .badge { background:#3d2a70; }
+  .DONE { border-left-color:#22c55e; } .DONE .badge { background:#0c4a2b; color:#86efac; }
+  .FAILED { border-left-color:#ef4444; } .FAILED .badge { background:#5b1717; color:#fca5a5; }
+  .feed { font-family:ui-monospace,Menlo,monospace; font-size:12.5px; }
+  .ev { padding:6px 8px; border-bottom:1px solid #1f2740; display:flex; gap:8px; }
+  .ev .tag { flex:0 0 88px; font-weight:700; }
+  .ev .who { flex:0 0 130px; color:var(--muted); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .PROMPT .tag { color:#7aa2ff; } .RESPONSE .tag { color:#7ee0a8; }
+  .STATE_CHANGE .tag { color:#9aa3bd; } .ESCALATION .tag, .GATE .tag { color:#ffc266; }
+  .ERROR .tag { color:#fca5a5; }
+  .empty { color:var(--muted); font-style:italic; }
+</style>
+</head>
+<body>
+  <header>
+    <h1>AI Agent Orchestration — live view</h1>
+    <p>Submit a feature request and watch the Team Lead decompose it and the agents collaborate (offline demo — no API key).</p>
+  </header>
+
+  <div class="bar">
+    <input id="req" value="Build a small calculator service exposing add and subtract operations."/>
+    <button id="go">Submit</button>
+  </div>
+
+  <div class="status" id="status">No project running.</div>
+
+  <div class="grid">
+    <div class="col">
+      <h2>Task graph (live state)</h2>
+      <div id="tasks"><div class="empty">Submit a request to see the task graph.</div></div>
+    </div>
+    <div class="col">
+      <h2>Agent interaction stream</h2>
+      <div id="feed" class="feed"><div class="empty">Waiting for events…</div></div>
+    </div>
+  </div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+let evtSource = null, poll = null, currentId = null;
+
+async function submit() {
+  const featureRequest = $('req').value.trim();
+  if (!featureRequest) return;
+  $('go').disabled = true;
+  $('feed').innerHTML = '';
+  $('tasks').innerHTML = '<div class="empty">Planning…</div>';
+
+  if (evtSource) evtSource.close();
+  if (poll) clearInterval(poll);
+
+  const res = await fetch('/api/projects', {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({ featureRequest })
+  });
+  const { projectId } = await res.json();
+  currentId = projectId;
+
+  evtSource = new EventSource('/api/stream?projectId=' + projectId);
+  evtSource.addEventListener('audit', (e) => addEvent(JSON.parse(e.data)));
+
+  poll = setInterval(() => refresh(projectId), 500);
+  refresh(projectId);
+}
+
+async function refresh(id) {
+  const [status, graph] = await Promise.all([
+    fetch('/api/projects/' + id).then(r => r.json()),
+    fetch('/api/projects/' + id + '/graph').then(r => r.json())
+  ]);
+  renderStatus(status);
+  renderTasks(graph.nodes || []);
+  const terminal = ['DONE','FAILED','BLOCKED','NEEDS_CLARIFICATION'].includes(status.state);
+  if (terminal) {
+    clearInterval(poll); poll = null;
+    setTimeout(() => { if (evtSource) evtSource.close(); }, 1500);
+    $('go').disabled = false;
+  }
+}
+
+function renderStatus(s) {
+  $('status').innerHTML =
+    `Project <b>${s.projectId.slice(0,8)}</b> · state <b>${s.state}</b> · ` +
+    `tasks <b>${s.completedTasks}/${s.totalTasks}</b> · open gates <b>${s.pendingGates.length}</b>`;
+}
+
+function renderTasks(nodes) {
+  if (!nodes.length) { $('tasks').innerHTML = '<div class="empty">No tasks yet…</div>'; return; }
+  const byId = {}; nodes.forEach(n => byId[n.id] = n);
+  $('tasks').innerHTML = nodes.map(n => {
+    const deps = (n.dependsOn || []).map(d => byId[d] ? byId[d].title : d);
+    return `<div class="task ${n.state}">
+      <span class="badge">${n.state}</span>
+      <div class="t">${esc(n.title)}</div>
+      <div class="r">▸ ${n.role || 'unassigned'}</div>
+      ${deps.length ? `<div class="dep">depends on: ${deps.map(esc).join(', ')}</div>` : ''}
+    </div>`;
+  }).join('');
+}
+
+function addEvent(ev) {
+  const feed = $('feed');
+  if (feed.querySelector('.empty')) feed.innerHTML = '';
+  const who = ev.actor === 'engine' ? 'engine' : (ev.actor || '').slice(0,8);
+  const row = document.createElement('div');
+  row.className = 'ev ' + ev.type;
+  row.innerHTML = `<span class="tag">${ev.type}</span><span class="who">${esc(who)}</span><span>${esc(ev.summary)}</span>`;
+  feed.appendChild(row);
+  feed.scrollTop = feed.scrollHeight;
+}
+
+function esc(s) { return String(s).replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c])); }
+
+$('go').addEventListener('click', submit);
+$('req').addEventListener('keydown', e => { if (e.key === 'Enter') submit(); });
+</script>
+</body>
+</html>
