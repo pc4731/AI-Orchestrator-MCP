@@ -6,11 +6,16 @@ REM Register with:
 REM   claude mcp add agent-orchestration -- C:\path\to\mcp-server.cmd
 setlocal
 set "DIR=%~dp0"
-set "JAR=%DIR%build\libs\agent-orchestration-0.1.0-SNAPSHOT.jar"
+set "JAR_NAME=agent-orchestration-0.1.0-SNAPSHOT.jar"
 
-REM Build the jar on first run if it is missing.
-if not exist "%JAR%" (
+REM Prefer the committed prebuilt jar (dist\), then a local build (build\libs\); build if neither.
+if exist "%DIR%dist\%JAR_NAME%" (
+  set "JAR=%DIR%dist\%JAR_NAME%"
+) else if exist "%DIR%build\libs\%JAR_NAME%" (
+  set "JAR=%DIR%build\libs\%JAR_NAME%"
+) else (
   call "%DIR%gradlew.bat" -p "%DIR%" bootJar --console=plain 1>&2
+  set "JAR=%DIR%build\libs\%JAR_NAME%"
 )
 
 REM stdout MUST stay clean for the MCP protocol; the app routes logs to stderr (logback-mcp.xml).
