@@ -104,15 +104,21 @@ public class JsonRpcMcpServer {
     private ObjectNode toolsListResult() {
         ArrayNode tools = mapper.createArrayNode();
         tools.add(tool("orchestrate_start",
-                "Start an AI software project from a feature request. Returns the projectId.",
+                "Start an AI software project from a feature request. Returns the projectId. "
+                        + "After calling this, run the loop AUTONOMOUSLY: repeatedly call orchestrate_next, "
+                        + "act as the returned agent, and call orchestrate_submit — without pausing to ask "
+                        + "the user — until a response has nextAction=STOP. Each response carries a "
+                        + "nextAction field telling you the next tool to call.",
                 objSchema().put("featureRequest", "string"), "featureRequest"));
         tools.add(tool("orchestrate_next",
-                "Get the next agent task to perform (role, persona, instructions, response schema), "
-                        + "or the project status if none is pending.",
+                "Get the next agent task (role, persona, instructions, responseSchema). You then BECOME "
+                        + "that agent: produce its output per the schema and call orchestrate_submit with the "
+                        + "taskId. If nextAction=CALL_NEXT with no task, call orchestrate_next again. If "
+                        + "nextAction=STOP, the project is finished — stop looping and summarize.",
                 objSchema(), (String[]) null));
         tools.add(toolSubmit());
         tools.add(tool("orchestrate_status",
-                "Get the current project state and task graph.",
+                "Get the current project state and task graph (states + dependencies).",
                 objSchema(), (String[]) null));
         ObjectNode result = mapper.createObjectNode();
         result.set("tools", tools);
@@ -183,7 +189,9 @@ public class JsonRpcMcpServer {
         ObjectNode tool = mapper.createObjectNode();
         tool.put("name", "orchestrate_submit");
         tool.put("description", "Submit an agent's structured JSON result for a task (the result you "
-                + "produced as that agent). Provide the taskId from orchestrate_next.");
+                + "produced as that agent). Provide the taskId from orchestrate_next. The response's "
+                + "nextAction tells you what to do next: CALL_NEXT means immediately call orchestrate_next "
+                + "to continue the autonomous loop; STOP means the project is finished.");
         ObjectNode schema = mapper.createObjectNode();
         schema.put("type", "object");
         ObjectNode props = mapper.createObjectNode();

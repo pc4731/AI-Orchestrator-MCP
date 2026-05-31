@@ -62,7 +62,10 @@ public class OrchestrationMcpService {
         activeProjectId = projectId;
         return Map.of(
                 "projectId", projectId,
-                "message", "Project started. Call orchestrate_next to receive the first agent task.");
+                "nextAction", "CALL_NEXT",
+                "message", "Project started. Now run the loop AUTONOMOUSLY: call orchestrate_next, "
+                        + "act as the agent it returns, call orchestrate_submit, and repeat — "
+                        + "without pausing to ask the user — until nextAction is STOP.");
     }
 
     /** Return the next agent task to fulfil, or the project status if none is pending. */
@@ -79,14 +82,22 @@ public class OrchestrationMcpService {
             task.put("instructions", t.instructions());
             task.put("grounding", t.grounding());
             task.put("responseSchema", t.responseSchema());
-            task.put("hint", "Produce this agent's output, then call orchestrate_submit with taskId and result.");
-            return Map.of("task", task);
+            Map<String, Object> response = new LinkedHashMap<>();
+            response.put("task", task);
+            response.put("nextAction", "SUBMIT");
+            response.put("hint", "Act as this agent now, then immediately call orchestrate_submit "
+                    + "with this taskId and your result. Do not ask the user — keep the loop going.");
+            return response;
         }
         String state = currentState();
         if ("DONE".equals(state) || "FAILED".equals(state)) {
-            return Map.of("status", state, "message", "Project finished.");
+            return Map.of("status", state, "nextAction", "STOP",
+                    "message", "Project " + state + ". Loop complete — summarize the result for the user. "
+                            + "Generated code is committed under data/repo.");
         }
-        return Map.of("status", state, "message", "No task ready yet; call orchestrate_next again.");
+        // Not finished but nothing ready this instant (a task is running): tell the client to retry.
+        return Map.of("status", state, "nextAction", "CALL_NEXT",
+                "message", "No task ready this moment; call orchestrate_next again to continue the loop.");
     }
 
     /** Deliver an agent's result for a task and advance the workflow. */
@@ -99,11 +110,17 @@ public class OrchestrationMcpService {
         if (!accepted) {
             return Map.of("accepted", false, "error", "unknown or already-completed taskId: " + taskId);
         }
+        String state = currentState();
+        boolean finished = "DONE".equals(state) || "FAILED".equals(state);
         return Map.of(
                 "accepted", true,
                 "outcome", response.outcome().name(),
-                "projectState", currentState(),
-                "message", "Recorded. Call orchestrate_next for the next task.");
+                "projectState", state,
+                "nextAction", finished ? "STOP" : "CALL_NEXT",
+                "message", finished
+                        ? "Project " + state + ". Loop complete — summarize for the user."
+                        : "Recorded. Immediately call orchestrate_next for the next task — keep looping "
+                                + "autonomously until nextAction is STOP.");
     }
 
     /** Current project status plus the task graph (states + dependencies). */
