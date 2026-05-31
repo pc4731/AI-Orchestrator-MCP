@@ -60,7 +60,9 @@ class EngineAgentsEndToEndTest {
                         + "{\"id\":\"b\",\"title\":\"Implement\",\"description\":\"code\",\"role\":\"BACKEND_DEVELOPER\",\"dependsOn\":[\"a\"]}]}}",
                 "{\"status\":\"COMPLETED\",\"confidence\":\"HIGH\",\"output\":{\"design\":\"layered\"}}",
                 "{\"status\":\"COMPLETED\",\"confidence\":\"HIGH\",\"artifacts\":["
-                        + "{\"path\":\"src/App.java\",\"content\":\"class App {}\"}],\"output\":{\"summary\":\"done\"}}");
+                        + "{\"path\":\"src/main/java/App.java\",\"content\":\"class App {}\"},"
+                        + "{\"path\":\"src/test/java/AppTest.java\",\"content\":\"class AppTest {}\"}],"
+                        + "\"output\":{\"summary\":\"done\"}}");
 
         ToolExecutor tools = req -> new ToolExecutor.ExecutionResult(0, "", "", false, Duration.ZERO);
         ConfigurableAgentFactory factory = new ConfigurableAgentFactory(
@@ -80,7 +82,7 @@ class EngineAgentsEndToEndTest {
                     "build a todo app", Map.of(), Optional.empty()));
 
             assertEquals(WorkflowState.DONE, engine.awaitSettled(handle.projectId(), Duration.ofSeconds(10)));
-            assertEquals("class App {}", repo.read("src/App.java").orElseThrow());
+            assertEquals("class App {}", repo.read("src/main/java/App.java").orElseThrow());
             assertFalse(memory.checkpoints(handle.projectId()).isEmpty());
             assertTrue(engine.status(handle.projectId()).completedTasks() >= 2);
         } finally {

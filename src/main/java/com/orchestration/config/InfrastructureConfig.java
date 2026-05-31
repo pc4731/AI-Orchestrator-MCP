@@ -119,8 +119,10 @@ public class InfrastructureConfig {
     @Bean
     public TaskProcessor taskProcessor(AgentFactory agentFactory,
                                        ArtifactRepository artifactRepository,
-                                       AuditLog auditLog) {
-        return new AgentTaskProcessor(agentFactory, artifactRepository, auditLog);
+                                       AuditLog auditLog,
+                                       WorkspaceProperties workspace) {
+        return new AgentTaskProcessor(agentFactory, artifactRepository, auditLog,
+                workspace.repoDir(), workspace.testCommand());
     }
 
     @Bean(destroyMethod = "shutdown")

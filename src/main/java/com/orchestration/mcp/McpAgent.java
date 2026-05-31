@@ -122,13 +122,18 @@ public class McpAgent implements Agent {
                             + "authn/authz, input validation, secrets handling, dependency risk, and "
                             + "data exposure. Set status NEEDS_REVIEW if there are blocking issues.";
             case BACKEND_DEVELOPER, FRONTEND_DEVELOPER ->
-                    "Implement the code from the architect's (and designer's) spec. Return every file "
-                            + "you create or change in the artifacts array (repository-relative path + "
-                            + "full content). Use only declared, verifiable dependencies; never invent "
-                            + "APIs. Summarize what you built in output.summary.";
+                    "Implement the code AND its automated tests from the architect's (and designer's) "
+                            + "spec. Return every file you create or change in the artifacts array "
+                            + "(repository-relative path + full content), INCLUDING test files that "
+                            + "cover each feature (happy path + key edge cases) and run under the "
+                            + "project's standard test command. Use only declared, verifiable "
+                            + "dependencies; never invent APIs. Summarize in output.summary.";
             case QA_ENGINEER ->
-                    "Verify the implementation (run/inspect the tests) and report the result; use "
-                            + "status NEEDS_REVIEW with reproducible details if anything fails.";
+                    "Verify the implementation by actually RUNNING the project's test command in the "
+                            + "repo (use the testCommand and workingDir provided), not by reasoning. "
+                            + "Report the real result; if there are no tests or they don't exercise the "
+                            + "features, say so and set status NEEDS_REVIEW. Use NEEDS_REVIEW with "
+                            + "reproducible details on any failure.";
         };
     }
 

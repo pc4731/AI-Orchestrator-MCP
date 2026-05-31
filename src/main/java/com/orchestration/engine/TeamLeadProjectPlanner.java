@@ -54,10 +54,18 @@ public class TeamLeadProjectPlanner implements ProjectPlanner {
             TaskId taskId = TaskId.random();
             String logicalId = asString(spec.get("id"), taskId.value());
             logicalToTaskId.put(logicalId, taskId);
+            // A task may carry a testCommand override (e.g. the Team Lead specifies [npm, test]
+            // for a QA task on a Node project); it flows into task metadata.
+            Map<String, Object> metadata = new HashMap<>();
+            List<?> testCommand = asList(spec.get("testCommand"));
+            if (!testCommand.isEmpty()) {
+                metadata.put("testCommand", testCommand.stream().map(String::valueOf).toList());
+            }
             graph.addTask(newTask(taskId,
                     asString(spec.get("title"), "Task"),
                     asString(spec.get("description"), ""),
-                    parseRole(spec.get("role"))));
+                    parseRole(spec.get("role")),
+                    metadata));
         }
         for (Map<String, Object> spec : taskSpecs) {
             TaskId dependent = logicalToTaskId.get(asString(spec.get("id"), null));
@@ -89,9 +97,14 @@ public class TeamLeadProjectPlanner implements ProjectPlanner {
     }
 
     private Task newTask(TaskId id, String title, String description, AgentRole role) {
+        return newTask(id, title, description, role, Map.of());
+    }
+
+    private Task newTask(TaskId id, String title, String description, AgentRole role,
+                         Map<String, Object> metadata) {
         Instant now = Instant.now();
         return new Task(id, title, description, role, WorkflowState.PENDING,
-                List.of(), Map.of(), now, now);
+                List.of(), metadata, now, now);
     }
 
     private AgentRole parseRole(Object value) {

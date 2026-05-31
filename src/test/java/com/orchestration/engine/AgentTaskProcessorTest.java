@@ -20,6 +20,8 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 
+import java.util.concurrent.atomic.AtomicReference;
+
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 
@@ -27,6 +29,21 @@ class AgentTaskProcessorTest {
 
     @TempDir
     Path repoDir;
+
+    /** Captures the request it receives so tests can inspect injected parameters. */
+    private static Agent capturingAgent(AtomicReference<Agent.Request> sink) {
+        return new Agent() {
+            @Override public AgentId id() { return new AgentId("qa-1"); }
+            @Override public AgentRole role() { return AgentRole.QA_ENGINEER; }
+            @Override public Set<Capability> capabilities() { return Set.of(Capability.RUN_TESTS); }
+            @Override public boolean canHandle(Task task) { return true; }
+            @Override public Response handle(Request request, Context context) {
+                sink.set(request);
+                return new Response(Outcome.COMPLETED, Map.of(), List.of(),
+                        Confidence.HIGH, List.of(), Optional.empty());
+            }
+        };
+    }
 
     /** A stub agent that returns one code artifact. */
     private static Agent artifactAgent() {
@@ -66,5 +83,37 @@ class AgentTaskProcessorTest {
         assertEquals(Agent.Outcome.COMPLETED, response.outcome());
         assertEquals("class A {}", repo.read("src/A.java").orElseThrow());
         assertFalse(audit.forTask("t1").isEmpty());
+    }
+
+    @Test
+    void injectsWorkingDirAndDefaultTestCommandIntoTheRequest() {
+        AtomicReference<Agent.Request> seen = new AtomicReference<>();
+        AgentTaskProcessor processor = new AgentTaskProcessor(
+                factoryReturning(capturingAgent(seen)),
+                new JGitArtifactRepository(repoDir), new InMemoryAuditLog(),
+                "/work/repo", List.of("npm", "test"));
+
+        Task task = new Task(new TaskId("t1"), "QA", "", AgentRole.QA_ENGINEER,
+                WorkflowState.PENDING, List.of(), Map.of(), Instant.now(), Instant.now());
+        processor.process("p1", task);
+
+        assertEquals("/work/repo", seen.get().parameters().get("workingDir"));
+        assertEquals(List.of("npm", "test"), seen.get().parameters().get("testCommand"));
+    }
+
+    @Test
+    void taskMetadataOverridesTheDefaultTestCommand() {
+        AtomicReference<Agent.Request> seen = new AtomicReference<>();
+        AgentTaskProcessor processor = new AgentTaskProcessor(
+                factoryReturning(capturingAgent(seen)),
+                new JGitArtifactRepository(repoDir), new InMemoryAuditLog(),
+                "/work/repo", List.of("./gradlew", "test"));
+
+        Task task = new Task(new TaskId("t1"), "QA", "", AgentRole.QA_ENGINEER,
+                WorkflowState.PENDING, List.of(), Map.of("testCommand", List.of("pytest")),
+                Instant.now(), Instant.now());
+        processor.process("p1", task);
+
+        assertEquals(List.of("pytest"), seen.get().parameters().get("testCommand"));
     }
 }

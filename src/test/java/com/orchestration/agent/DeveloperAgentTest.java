@@ -31,16 +31,28 @@ class DeveloperAgentTest {
     }
 
     @Test
-    void keepsCompletedWhenCodeArtifactsAreProduced() {
+    void keepsCompletedWhenCodeAndTestsAreProduced() {
         ScriptedLlmClient llm = new ScriptedLlmClient(
                 "{\"status\":\"COMPLETED\",\"confidence\":\"HIGH\",\"artifacts\":["
-                        + "{\"path\":\"src/A.java\",\"content\":\"class A {}\"}]}");
+                        + "{\"path\":\"src/main/java/A.java\",\"content\":\"class A {}\"},"
+                        + "{\"path\":\"src/test/java/ATest.java\",\"content\":\"class ATest {}\"}]}");
 
         Agent.Response response = developer(llm).handle(request(), new Agent.Context("p1", "c1", Map.of()));
 
         assertEquals(Agent.Outcome.COMPLETED, response.outcome());
-        assertEquals(1, response.artifacts().size());
-        assertEquals("src/A.java", response.artifacts().get(0).path());
+        assertEquals(2, response.artifacts().size());
+    }
+
+    @Test
+    void downgradesToReviewWhenCodeHasNoTests() {
+        ScriptedLlmClient llm = new ScriptedLlmClient(
+                "{\"status\":\"COMPLETED\",\"confidence\":\"HIGH\",\"artifacts\":["
+                        + "{\"path\":\"src/main/java/A.java\",\"content\":\"class A {}\"}]}");
+
+        Agent.Response response = developer(llm).handle(request(), new Agent.Context("p1", "c1", Map.of()));
+
+        assertEquals(Agent.Outcome.NEEDS_REVIEW, response.outcome());
+        assertTrue(response.escalationReason().orElse("").toLowerCase().contains("test"));
     }
 
     @Test
