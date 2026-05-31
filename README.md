@@ -9,6 +9,34 @@ development projects. Clean architecture, SOLID, and designed for extensibility.
 
 ---
 
+## Quickstart — use it free with your own Claude Code (no API key)
+
+In this mode your **Claude Code** is the brain for every agent (Team Lead, architects, developers,
+QA), so there's no Anthropic API key and no cost. The orchestration engine runs as a local **MCP
+server** that your Claude Code talks to.
+
+**Requirements:** a JDK (to build once), `git`, and [Claude Code](https://claude.com/claude-code).
+
+```bash
+git clone <this-repo-url> agent-orchestration
+cd agent-orchestration
+./install.sh            # builds the server + registers it with Claude Code
+claude mcp list         # should show: agent-orchestration … ✓ Connected
+```
+
+Then open a **new** Claude Code session (in any folder) and say:
+
+> *"Use the agent-orchestration MCP: call `orchestrate_start` with my feature request
+> 'build a URL-shortener REST API in Java', then loop `orchestrate_next` / `orchestrate_submit`,
+> acting as each agent it gives you, until the project is DONE."*
+
+Claude Code will decompose the request, then play each agent in turn. The generated application is
+committed to a real git repo at **`data/repo/`**.
+
+> MCP servers load when a Claude Code **session starts**, so register first, then start a new session.
+
+---
+
 ## Architecture
 
 ```mermaid
