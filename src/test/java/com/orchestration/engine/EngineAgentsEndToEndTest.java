@@ -36,10 +36,10 @@ class EngineAgentsEndToEndTest {
 
     private static AgentsProperties agents() {
         return new AgentsProperties(Map.of(
-                "team-lead", new AgentDefinition("TEAM_LEAD", "opus", null, List.of("DECOMPOSE_TASKS"), 4096, 0.2),
-                "backend-architect", new AgentDefinition("BACKEND_ARCHITECT", "opus", null,
+                "team-lead", AgentDefinition.of("TEAM_LEAD", "opus", null, List.of("DECOMPOSE_TASKS"), 4096, 0.2),
+                "backend-architect", AgentDefinition.of("BACKEND_ARCHITECT", "opus", null,
                         List.of("DESIGN_ARCHITECTURE"), 8192, 0.2),
-                "backend-developer", new AgentDefinition("BACKEND_DEVELOPER", "sonnet", null,
+                "backend-developer", AgentDefinition.of("BACKEND_DEVELOPER", "sonnet", null,
                         List.of("WRITE_CODE", "EXECUTE_TOOLS"), 8192, 0.1)));
     }
 
@@ -64,7 +64,8 @@ class EngineAgentsEndToEndTest {
 
         ToolExecutor tools = req -> new ToolExecutor.ExecutionResult(0, "", "", false, Duration.ZERO);
         ConfigurableAgentFactory factory = new ConfigurableAgentFactory(
-                agents(), llmProperties(), llm, tools, new DefaultTokenBudgetManager());
+                agents(), llmProperties(), llm, tools, new DefaultTokenBudgetManager(),
+                com.orchestration.agent.SkillRegistry.empty());
 
         SqliteMemoryStore memory = SqliteMemoryStore.inMemory();
         try {

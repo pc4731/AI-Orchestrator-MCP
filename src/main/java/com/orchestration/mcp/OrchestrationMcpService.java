@@ -68,9 +68,11 @@ public class OrchestrationMcpService {
         return Map.of(
                 "projectId", projectId,
                 "nextAction", "CALL_NEXT",
-                "message", "Project started. Now run the loop AUTONOMOUSLY: call orchestrate_next, "
-                        + "act as the agent it returns, call orchestrate_submit, and repeat — "
-                        + "without pausing to ask the user — until nextAction is STOP.");
+                "message", "Project started. Run the loop AUTONOMOUSLY: call orchestrate_next, act as "
+                        + "the agent it returns, call orchestrate_submit, and repeat until nextAction is "
+                        + "STOP. EXCEPTION: if an agent — especially the Team Lead — returns clarifying "
+                        + "questions (status INSUFFICIENT_INFORMATION with output.questions), ASK the "
+                        + "user those questions, incorporate the answers, and then continue the loop.");
     }
 
     /** Return the next agent task to fulfil, or the project status if none is pending. */

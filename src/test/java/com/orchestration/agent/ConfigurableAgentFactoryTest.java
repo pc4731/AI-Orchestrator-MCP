@@ -1,5 +1,6 @@
 package com.orchestration.agent;
 
+import com.orchestration.agent.SkillRegistry;
 import com.orchestration.budget.DefaultTokenBudgetManager;
 import com.orchestration.config.AgentDefinition;
 import com.orchestration.config.AgentsProperties;
@@ -25,13 +26,13 @@ class ConfigurableAgentFactoryTest {
 
     private static ConfigurableAgentFactory factory() {
         AgentsProperties agents = new AgentsProperties(Map.of(
-                "team-lead", new AgentDefinition("TEAM_LEAD", "opus", "nonexistent.md",
+                "team-lead", AgentDefinition.of("TEAM_LEAD", "opus", "nonexistent.md",
                         List.of("DECOMPOSE_TASKS"), 4096, 0.2),
-                "backend-developer", new AgentDefinition("BACKEND_DEVELOPER", "sonnet", null,
+                "backend-developer", AgentDefinition.of("BACKEND_DEVELOPER", "sonnet", null,
                         List.of("WRITE_CODE", "EXECUTE_TOOLS"), 8192, 0.1),
-                "qa-engineer", new AgentDefinition("QA_ENGINEER", "sonnet", null,
+                "qa-engineer", AgentDefinition.of("QA_ENGINEER", "sonnet", null,
                         List.of("RUN_TESTS", "EXECUTE_TOOLS"), 4096, 0.2),
-                "backend-architect", new AgentDefinition("BACKEND_ARCHITECT", "opus", null,
+                "backend-architect", AgentDefinition.of("BACKEND_ARCHITECT", "opus", null,
                         List.of("DESIGN_ARCHITECTURE"), 8192, 0.2)));
         LlmProperties llm = new LlmProperties(
                 new LlmProperties.Api("http://x", "2023-06-01", "key", 30),
@@ -39,7 +40,7 @@ class ConfigurableAgentFactoryTest {
                 new LlmProperties.PromptCache(true),
                 Map.of("opus", "claude-opus-4-8", "sonnet", "claude-sonnet-4-6"));
         return new ConfigurableAgentFactory(agents, llm, new ScriptedLlmClient(), TOOLS,
-                new DefaultTokenBudgetManager());
+                new DefaultTokenBudgetManager(), SkillRegistry.empty());
     }
 
     @Test

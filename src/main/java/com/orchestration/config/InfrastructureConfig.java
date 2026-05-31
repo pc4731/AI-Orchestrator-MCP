@@ -2,6 +2,7 @@ package com.orchestration.config;
 
 import com.orchestration.agent.AgentFactory;
 import com.orchestration.agent.ConfigurableAgentFactory;
+import com.orchestration.agent.SkillRegistry;
 import com.orchestration.artifact.ArtifactRepository;
 import com.orchestration.artifact.JGitArtifactRepository;
 import com.orchestration.audit.AuditEventBroadcaster;
@@ -104,8 +105,10 @@ public class InfrastructureConfig {
                                      LlmProperties llmProperties,
                                      LlmClient llmClient,
                                      ToolExecutor toolExecutor,
-                                     TokenBudgetManager tokenBudgetManager) {
-        return new ConfigurableAgentFactory(agents, llmProperties, llmClient, toolExecutor, tokenBudgetManager);
+                                     TokenBudgetManager tokenBudgetManager,
+                                     SkillRegistry skillRegistry) {
+        return new ConfigurableAgentFactory(agents, llmProperties, llmClient, toolExecutor,
+                tokenBudgetManager, skillRegistry);
     }
 
     @Bean

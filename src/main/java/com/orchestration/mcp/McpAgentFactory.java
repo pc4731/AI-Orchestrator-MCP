@@ -6,10 +6,12 @@ import com.orchestration.agent.AgentId;
 import com.orchestration.agent.AgentPrompts;
 import com.orchestration.agent.AgentRole;
 import com.orchestration.agent.Capability;
+import com.orchestration.agent.SkillRegistry;
 import com.orchestration.config.AgentDefinition;
 import com.orchestration.config.AgentsProperties;
 
 import java.util.Arrays;
+import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
@@ -24,10 +26,12 @@ public class McpAgentFactory implements AgentFactory {
 
     private final AgentsProperties agents;
     private final McpBridge bridge;
+    private final SkillRegistry skills;
 
-    public McpAgentFactory(AgentsProperties agents, McpBridge bridge) {
+    public McpAgentFactory(AgentsProperties agents, McpBridge bridge, SkillRegistry skills) {
         this.agents = Objects.requireNonNull(agents, "agents");
         this.bridge = Objects.requireNonNull(bridge, "bridge");
+        this.skills = Objects.requireNonNull(skills, "skills");
     }
 
     @Override
@@ -36,7 +40,10 @@ public class McpAgentFactory implements AgentFactory {
         Set<Capability> capabilities = definition
                 .map(d -> d.capabilities().stream().map(Capability::valueOf).collect(Collectors.toUnmodifiableSet()))
                 .orElse(Set.of());
-        String prompt = AgentPrompts.load(definition.map(AgentDefinition::promptFile).orElse(null), role);
+        List<String> skillNames = definition.map(AgentDefinition::skills).orElse(List.of());
+        String prompt = AgentPrompts.append(
+                AgentPrompts.load(definition.map(AgentDefinition::promptFile).orElse(null), role),
+                skills.resolve(skillNames));
         return new McpAgent(AgentId.random(), role, capabilities, prompt, bridge);
     }
 

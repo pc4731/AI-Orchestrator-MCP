@@ -34,10 +34,10 @@ class OrchestrationMcpServiceTest {
 
     private static AgentsProperties agents() {
         return new AgentsProperties(Map.of(
-                "team-lead", new AgentDefinition("TEAM_LEAD", "x", null, List.of("DECOMPOSE_TASKS"), 4096, 0.2),
-                "backend-architect", new AgentDefinition("BACKEND_ARCHITECT", "x", null,
+                "team-lead", AgentDefinition.of("TEAM_LEAD", "x", null, List.of("DECOMPOSE_TASKS"), 4096, 0.2),
+                "backend-architect", AgentDefinition.of("BACKEND_ARCHITECT", "x", null,
                         List.of("DESIGN_ARCHITECTURE"), 4096, 0.2),
-                "backend-developer", new AgentDefinition("BACKEND_DEVELOPER", "x", null,
+                "backend-developer", AgentDefinition.of("BACKEND_DEVELOPER", "x", null,
                         List.of("WRITE_CODE"), 4096, 0.2)));
     }
 
@@ -55,7 +55,8 @@ class OrchestrationMcpServiceTest {
     @Test
     void claudeCodeDrivesTheTeamToCommittedCode() throws Exception {
         McpBridge bridge = new McpBridge();
-        AgentFactory factory = new McpAgentFactory(agents(), bridge);
+        AgentFactory factory = new McpAgentFactory(agents(), bridge,
+                com.orchestration.agent.SkillRegistry.empty());
         SqliteMemoryStore memory = SqliteMemoryStore.inMemory();
         try {
             JGitArtifactRepository repo = new JGitArtifactRepository(repoDir);

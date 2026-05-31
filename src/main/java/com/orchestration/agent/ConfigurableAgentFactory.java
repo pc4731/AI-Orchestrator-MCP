@@ -33,17 +33,20 @@ public class ConfigurableAgentFactory implements AgentFactory {
     private final LlmClient llmClient;
     private final ToolExecutor toolExecutor;
     private final TokenBudgetManager budget;
+    private final SkillRegistry skills;
 
     public ConfigurableAgentFactory(AgentsProperties agents,
                                     LlmProperties llmProperties,
                                     LlmClient llmClient,
                                     ToolExecutor toolExecutor,
-                                    TokenBudgetManager budget) {
+                                    TokenBudgetManager budget,
+                                    SkillRegistry skills) {
         this.agents = Objects.requireNonNull(agents, "agents");
         this.llmProperties = Objects.requireNonNull(llmProperties, "llmProperties");
         this.llmClient = Objects.requireNonNull(llmClient, "llmClient");
         this.toolExecutor = Objects.requireNonNull(toolExecutor, "toolExecutor");
         this.budget = Objects.requireNonNull(budget, "budget");
+        this.skills = Objects.requireNonNull(skills, "skills");
     }
 
     @Override
@@ -76,7 +79,8 @@ public class ConfigurableAgentFactory implements AgentFactory {
         Set<Capability> capabilities = definition.capabilities().stream()
                 .map(Capability::valueOf)
                 .collect(Collectors.toUnmodifiableSet());
-        String prompt = AgentPrompts.load(definition.promptFile(), role);
+        String prompt = AgentPrompts.append(
+                AgentPrompts.load(definition.promptFile(), role), skills.resolve(definition.skills()));
         return new AgentSpec(AgentId.random(), role, capabilities, model, prompt,
                 definition.maxOutputTokens(), definition.temperature(),
                 llmProperties.promptCache().enabled(), DEFAULT_MAX_SCHEMA_RETRIES);

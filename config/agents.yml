@@ -33,6 +33,7 @@ agents:
       capabilities: [DESIGN_UI]
       max-output-tokens: 4096
       temperature: 0.4
+      skills: [accessibility, modern-ui]   # pluggable skills appended to this agent's prompt
 
     backend-developer:
       role: BACKEND_DEVELOPER
@@ -46,6 +47,7 @@ agents:
       role: FRONTEND_DEVELOPER
       model: sonnet
       prompt-file: prompts/frontend-developer.md
+      skills: [accessibility, modern-ui]
       capabilities: [WRITE_CODE, EXECUTE_TOOLS]
       max-output-tokens: 8192
       temperature: 0.1

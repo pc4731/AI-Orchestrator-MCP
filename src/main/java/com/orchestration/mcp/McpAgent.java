@@ -76,9 +76,17 @@ public class McpAgent implements Agent {
             sb.append(request.instructions()).append('\n');
         }
         if (role == AgentRole.TEAM_LEAD) {
-            sb.append("Decompose the request into concrete, role-assigned tasks (see schema). ")
-                    .append("If it is too ambiguous, use status INSUFFICIENT_INFORMATION and list ")
-                    .append("questions in output.questions instead of guessing.");
+            sb.append("FIRST clarify, THEN decompose. Check for unstated scope (extra features), ")
+                    .append("whether there is a UI and its theme/branding, data/persistence needs ")
+                    .append("(e.g. history retention), and non-functional needs (scale, auth, ")
+                    .append("security). If important dimensions are missing or ambiguous, use status ")
+                    .append("INSUFFICIENT_INFORMATION and put concise, specific questions in ")
+                    .append("output.questions — ASK THE USER these questions, then continue. Only ")
+                    .append("when the request is clear (or the user said use your best judgment) ")
+                    .append("decompose into role-assigned tasks (see schema), covering the full agreed ")
+                    .append("scope (UI_DESIGNER task when there is a UI, DBA for meaningful data, ")
+                    .append("SECURITY_REVIEWER when handling user data); record decisions in ")
+                    .append("output.assumptions.");
         } else if (role == AgentRole.BACKEND_DEVELOPER || role == AgentRole.FRONTEND_DEVELOPER) {
             sb.append("Return every file you create or change in the artifacts array ")
                     .append("(repository-relative path + full content).");

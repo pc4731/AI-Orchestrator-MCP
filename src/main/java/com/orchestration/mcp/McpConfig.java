@@ -1,6 +1,7 @@
 package com.orchestration.mcp;
 
 import com.orchestration.agent.AgentFactory;
+import com.orchestration.agent.SkillRegistry;
 import com.orchestration.config.AgentsProperties;
 import com.orchestration.engine.OrchestrationEngine;
 import com.orchestration.memory.MemoryStore;
@@ -25,8 +26,8 @@ public class McpConfig {
     }
 
     @Bean
-    public AgentFactory agentFactory(AgentsProperties agents, McpBridge bridge) {
-        return new McpAgentFactory(agents, bridge);
+    public AgentFactory agentFactory(AgentsProperties agents, McpBridge bridge, SkillRegistry skills) {
+        return new McpAgentFactory(agents, bridge, skills);
     }
 
     @Bean

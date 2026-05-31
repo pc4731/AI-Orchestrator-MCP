@@ -14,6 +14,14 @@ public final class AgentPrompts {
     private AgentPrompts() {
     }
 
+    /** Append an extra section (e.g. resolved skills) to a base prompt, skipping blanks. */
+    public static String append(String base, String extra) {
+        if (extra == null || extra.isBlank()) {
+            return base;
+        }
+        return (base == null ? "" : base) + "\n\n" + extra;
+    }
+
     /** Read the configured prompt file, falling back to {@link #defaultPrompt(AgentRole)}. */
     public static String load(String promptFile, AgentRole role) {
         if (promptFile != null && !promptFile.isBlank()) {
