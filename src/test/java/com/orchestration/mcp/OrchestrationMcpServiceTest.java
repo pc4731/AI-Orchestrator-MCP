@@ -65,7 +65,8 @@ class OrchestrationMcpServiceTest {
                     new AgentTaskProcessor(factory, repo, audit),
                     memory, audit);
 
-            OrchestrationMcpService service = new OrchestrationMcpService(engine, bridge, memory);
+            OrchestrationMcpService service = new OrchestrationMcpService(
+                    engine, bridge, memory, new com.orchestration.web.ActiveProject());
 
             Map<String, Object> started = service.start("Build a todo app");
             assertTrue(started.containsKey("projectId"), "start should return a projectId");

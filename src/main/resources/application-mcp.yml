@@ -1,8 +1,11 @@
-# MCP server profile: stdio JSON-RPC, no web server, no API key (Claude Code is the brain).
+# MCP server profile: stdio JSON-RPC (Claude Code is the brain, no API key) PLUS a read-only
+# web dashboard so you can watch the real agent flow in a browser while Claude Code orchestrates.
 spring:
   main:
-    web-application-type: none
     banner-mode: "off"
-# stdout is the MCP protocol channel — route all logging to stderr.
+server:
+  # The read-only dashboard. Override with --server.port=NNNN if this port is taken.
+  port: 8090
+# stdout is the MCP protocol channel — route ALL logging to stderr so it stays clean.
 logging:
   config: classpath:logback-mcp.xml

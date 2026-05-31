@@ -45,10 +45,10 @@
 <body>
   <header>
     <h1>AI Agent Orchestration — live view</h1>
-    <p>Submit a feature request and watch the Team Lead decompose it and the agents collaborate (offline demo — no API key).</p>
+    <p id="subtitle">Submit a feature request and watch the Team Lead decompose it and the agents collaborate.</p>
   </header>
 
-  <div class="bar">
+  <div class="bar" id="bar">
     <input id="req" value="Build a small calculator service exposing add and subtract operations."/>
     <button id="go">Submit</button>
   </div>
@@ -69,29 +69,66 @@
 <script>
 const $ = (id) => document.getElementById(id);
 let evtSource = null, poll = null, currentId = null;
+let mode = 'interactive';
 
-async function submit() {
-  const featureRequest = $('req').value.trim();
-  if (!featureRequest) return;
-  $('go').disabled = true;
+// Decide mode on load: "observer" = driven by Claude Code via MCP (watch only);
+// "interactive" = this page submits requests itself.
+async function init() {
+  try {
+    const info = await fetch('/api/info').then(r => r.json());
+    mode = info.mode || 'interactive';
+  } catch (e) { mode = 'interactive'; }
+
+  if (mode === 'observer') {
+    $('bar').style.display = 'none';
+    $('subtitle').textContent =
+      'Observer mode — projects are driven by Claude Code via MCP. This dashboard follows the live run.';
+    $('tasks').innerHTML = '<div class="empty">Waiting for Claude Code to start a project…</div>';
+    $('status').textContent = 'Waiting for an MCP-driven project…';
+    setInterval(pollActive, 1500);
+    pollActive();
+  } else {
+    $('go').addEventListener('click', submit);
+    $('req').addEventListener('keydown', e => { if (e.key === 'Enter') submit(); });
+  }
+}
+
+// Observer mode: ask the server which project to follow; attach when one appears or changes.
+async function pollActive() {
+  try {
+    const { projectId } = await fetch('/api/active').then(r => r.json());
+    if (projectId && projectId !== currentId) {
+      attach(projectId);
+    }
+  } catch (e) { /* server not ready yet */ }
+}
+
+// Begin following a project: open its event stream and poll its status/graph.
+function attach(projectId) {
+  currentId = projectId;
   $('feed').innerHTML = '';
-  $('tasks').innerHTML = '<div class="empty">Planning…</div>';
-
+  $('tasks').innerHTML = '<div class="empty">Loading…</div>';
   if (evtSource) evtSource.close();
   if (poll) clearInterval(poll);
-
-  const res = await fetch('/api/projects', {
-    method: 'POST', headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({ featureRequest })
-  });
-  const { projectId } = await res.json();
-  currentId = projectId;
 
   evtSource = new EventSource('/api/stream?projectId=' + projectId);
   evtSource.addEventListener('audit', (e) => addEvent(JSON.parse(e.data)));
 
   poll = setInterval(() => refresh(projectId), 500);
   refresh(projectId);
+}
+
+async function submit() {
+  const featureRequest = $('req').value.trim();
+  if (!featureRequest) return;
+  $('go').disabled = true;
+
+  const res = await fetch('/api/projects', {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({ featureRequest })
+  });
+  const { projectId } = await res.json();
+  attach(projectId);
 }
 
 async function refresh(id) {
@@ -101,11 +138,11 @@ async function refresh(id) {
   ]);
   renderStatus(status);
   renderTasks(graph.nodes || []);
-  const terminal = ['DONE','FAILED','BLOCKED','NEEDS_CLARIFICATION'].includes(status.state);
+  const terminal = ['DONE','FAILED'].includes(status.state);
   if (terminal) {
     clearInterval(poll); poll = null;
     setTimeout(() => { if (evtSource) evtSource.close(); }, 1500);
-    $('go').disabled = false;
+    if (mode === 'interactive') $('go').disabled = false;
   }
 }
 
@@ -142,8 +179,7 @@ function addEvent(ev) {
 
 function esc(s) { return String(s).replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c])); }
 
-$('go').addEventListener('click', submit);
-$('req').addEventListener('keydown', e => { if (e.key === 'Enter') submit(); });
+init();
 </script>
 </body>
 </html>

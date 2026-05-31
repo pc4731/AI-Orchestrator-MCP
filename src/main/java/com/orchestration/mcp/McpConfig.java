@@ -4,6 +4,7 @@ import com.orchestration.agent.AgentFactory;
 import com.orchestration.config.AgentsProperties;
 import com.orchestration.engine.OrchestrationEngine;
 import com.orchestration.memory.MemoryStore;
+import com.orchestration.web.ActiveProject;
 import org.springframework.boot.CommandLineRunner;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
@@ -31,12 +32,20 @@ public class McpConfig {
     @Bean
     public OrchestrationMcpService orchestrationMcpService(OrchestrationEngine engine,
                                                           McpBridge bridge,
-                                                          MemoryStore memoryStore) {
-        return new OrchestrationMcpService(engine, bridge, memoryStore);
+                                                          MemoryStore memoryStore,
+                                                          ActiveProject activeProject) {
+        return new OrchestrationMcpService(engine, bridge, memoryStore, activeProject);
     }
 
     @Bean
     public CommandLineRunner mcpServerRunner(OrchestrationMcpService service) {
-        return args -> new JsonRpcMcpServer(service).serve(System.in, System.out);
+        // Run the stdio MCP loop on a daemon thread so it doesn't block the web server (the
+        // dashboard) that also runs in this process under the mcp profile.
+        return args -> {
+            Thread t = new Thread(() -> new JsonRpcMcpServer(service).serve(System.in, System.out),
+                    "mcp-stdio");
+            t.setDaemon(true);
+            t.start();
+        };
     }
 }

@@ -5,6 +5,7 @@ import com.orchestration.agent.Agent;
 import com.orchestration.engine.OrchestrationEngine;
 import com.orchestration.memory.MemoryStore;
 import com.orchestration.task.GraphSnapshot;
+import com.orchestration.web.ActiveProject;
 
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
@@ -26,14 +27,17 @@ public class OrchestrationMcpService {
     private final OrchestrationEngine engine;
     private final McpBridge bridge;
     private final MemoryStore memoryStore;
+    private final ActiveProject activeProject;
     private final McpResponseMapper mapper = new McpResponseMapper();
 
     private volatile String activeProjectId;
 
-    public OrchestrationMcpService(OrchestrationEngine engine, McpBridge bridge, MemoryStore memoryStore) {
+    public OrchestrationMcpService(OrchestrationEngine engine, McpBridge bridge,
+                                   MemoryStore memoryStore, ActiveProject activeProject) {
         this.engine = Objects.requireNonNull(engine, "engine");
         this.bridge = Objects.requireNonNull(bridge, "bridge");
         this.memoryStore = Objects.requireNonNull(memoryStore, "memoryStore");
+        this.activeProject = Objects.requireNonNull(activeProject, "activeProject");
     }
 
     /** Start a project from a feature request; returns once the first agent task is ready. */
@@ -60,6 +64,7 @@ public class OrchestrationMcpService {
             return Map.of("error", "timed out starting project");
         }
         activeProjectId = projectId;
+        activeProject.set(projectId); // let the read-only dashboard follow this project
         return Map.of(
                 "projectId", projectId,
                 "nextAction", "CALL_NEXT",

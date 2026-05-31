@@ -4,6 +4,8 @@ import com.orchestration.audit.AuditEventBroadcaster;
 import com.orchestration.engine.OrchestrationEngine;
 import com.orchestration.memory.MemoryStore;
 import com.orchestration.task.GraphSnapshot;
+import org.springframework.core.env.Environment;
+import org.springframework.core.env.Profiles;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
@@ -38,12 +40,30 @@ public class ProjectController {
     private final OrchestrationEngine engine;
     private final MemoryStore memoryStore;
     private final AuditEventBroadcaster broadcaster;
+    private final ActiveProject activeProject;
+    private final boolean observerMode;
 
     public ProjectController(OrchestrationEngine engine, MemoryStore memoryStore,
-                             AuditEventBroadcaster broadcaster) {
+                             AuditEventBroadcaster broadcaster, ActiveProject activeProject,
+                             Environment environment) {
         this.engine = engine;
         this.memoryStore = memoryStore;
         this.broadcaster = broadcaster;
+        this.activeProject = activeProject;
+        // Under the mcp profile the browser only observes; Claude Code drives projects.
+        this.observerMode = environment.acceptsProfiles(Profiles.of("mcp"));
+    }
+
+    /** UI bootstrap: tells the page whether it can submit ("interactive") or only watch ("observer"). */
+    @GetMapping("/info")
+    public Map<String, Object> info() {
+        return Map.of("mode", observerMode ? "observer" : "interactive");
+    }
+
+    /** The project the dashboard should follow (set by the MCP driver). Empty until one starts. */
+    @GetMapping("/active")
+    public Map<String, Object> active() {
+        return Map.of("projectId", activeProject.get().orElse(""));
     }
 
     public record SubmitRequest(String featureRequest) {
