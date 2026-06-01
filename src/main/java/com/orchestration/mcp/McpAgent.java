@@ -82,18 +82,32 @@ public class McpAgent implements Agent {
     /** Role-specific guidance appended to every task so each agent knows what to produce. */
     private String roleGuidance(AgentRole role) {
         return switch (role) {
+            case BUSINESS_ANALYST ->
+                    "Elicit and clarify the requirements before any building happens. Probe HARD for "
+                            + "unstated needs: full feature scope (name likely-but-unstated features and "
+                            + "ask), exact UI expectations and fidelity (e.g. 'rebuild every component "
+                            + "as real HTML/CSS' vs a screenshot — never accept a shortcut), theme/"
+                            + "branding, data/persistence + retention, integrations, and non-functional "
+                            + "needs (scale, auth, security, browsers/devices). If anything material is "
+                            + "missing or ambiguous, set status INSUFFICIENT_INFORMATION and put concise, "
+                            + "specific questions in output.questions — ASK THE USER, incorporate the "
+                            + "answers, and only then produce a precise, testable specification in "
+                            + "output.specification with explicit acceptance criteria.";
+            case PROMPT_ENGINEER ->
+                    "Rewrite the downstream task into a crisp, self-contained prompt for the named "
+                            + "target role. In output.refinedPrompt give: the goal, the concrete inputs "
+                            + "to ground in, hard constraints, and explicit ACCEPTANCE CRITERIA the work "
+                            + "must meet (e.g. 'every component rendered as real markup, not an image'). "
+                            + "Be precise and token-efficient; remove ambiguity, do not add scope.";
             case TEAM_LEAD ->
-                    "FIRST clarify, THEN decompose. Check for unstated scope (extra features), "
-                            + "whether there is a UI and its theme/branding, data/persistence needs "
-                            + "(e.g. history retention), and non-functional needs (scale, auth, "
-                            + "security). If important dimensions are missing or ambiguous, use status "
-                            + "INSUFFICIENT_INFORMATION and put concise, specific questions in "
-                            + "output.questions — ASK THE USER these questions, then continue. Only "
-                            + "when the request is clear (or the user said use your best judgment) "
-                            + "decompose into role-assigned tasks (see schema), covering the full agreed "
-                            + "scope (UI_DESIGNER task when there is a UI, DBA for meaningful data, "
-                            + "SECURITY_REVIEWER when handling user data); record decisions in "
-                            + "output.assumptions.";
+                    "Decompose the agreed specification into concrete, role-assigned tasks (the "
+                            + "Business Analyst has already clarified requirements; if the spec is still "
+                            + "ambiguous, set INSUFFICIENT_INFORMATION with questions in output.questions "
+                            + "rather than guessing). Cover the FULL scope: a UI_DESIGNER task when there "
+                            + "is a UI, a DBA task for meaningful data, a SECURITY_REVIEWER task when "
+                            + "handling user data, and a QA_ENGINEER task that verifies the result "
+                            + "matches the acceptance criteria. Add review dependencies so work is "
+                            + "checked, not just produced. Record decisions in output.assumptions.";
             case BACKEND_ARCHITECT ->
                     "Produce the backend architecture in output: chosen patterns, components, tech "
                             + "stack (with rationale), data model, failure modes, and security "
@@ -123,8 +137,11 @@ public class McpAgent implements Agent {
                             + "data exposure. Set status NEEDS_REVIEW if there are blocking issues.";
             case BACKEND_DEVELOPER, FRONTEND_DEVELOPER ->
                     "Implement the code AND its automated tests from the architect's (and designer's) "
-                            + "spec. Return every file you create or change in the artifacts array "
-                            + "(repository-relative path + full content), INCLUDING test files that "
+                            + "spec. BUILD IT FOR REAL — reconstruct every component faithfully as actual "
+                            + "code/markup; never fake the result with a screenshot, a background image, "
+                            + "a stub, or placeholder text. Meet every acceptance criterion in the "
+                            + "refined prompt. Return every file you create or change in the artifacts "
+                            + "array (repository-relative path + full content), INCLUDING test files that "
                             + "cover each feature (happy path + key edge cases) and run under the "
                             + "project's standard test command. Use only declared, verifiable "
                             + "dependencies; never invent APIs. Summarize in output.summary.";

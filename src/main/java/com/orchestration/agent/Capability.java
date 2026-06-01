@@ -9,6 +9,8 @@ package com.orchestration.agent;
  */
 public enum Capability {
 
+    ELICIT_REQUIREMENTS,
+    REFINE_PROMPT,
     CLARIFY_REQUIREMENTS,
     DECOMPOSE_TASKS,
     DESIGN_ARCHITECTURE,

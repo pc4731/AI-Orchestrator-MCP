@@ -34,11 +34,17 @@ public class TeamLeadProjectPlanner implements ProjectPlanner {
 
     @Override
     public TaskGraph plan(String projectId, OrchestrationEngine.ProjectRequest request) {
+        // 1) Business Analyst elicits/clarifies requirements into a specification.
+        String specification = elicitSpecification(projectId, request);
+
+        // 2) Team Lead decomposes the (clarified) request + spec into a role-assigned task graph.
         Agent teamLead = agentFactory.create(AgentRole.TEAM_LEAD);
         Task planningTask = newTask(TaskId.random(), "Plan project", request.featureRequest(), AgentRole.TEAM_LEAD);
+        Map<String, String> grounding = specification.isBlank()
+                ? Map.of() : Map.of("specification", specification);
 
         Agent.Response response = teamLead.handle(
-                new Agent.Request(planningTask, request.featureRequest(), Map.of(), Map.of()),
+                new Agent.Request(planningTask, request.featureRequest(), grounding, Map.of()),
                 new Agent.Context(projectId, planningTask.id().value(), Map.of()));
 
         InMemoryTaskGraph graph = new InMemoryTaskGraph();
@@ -80,6 +86,28 @@ public class TeamLeadProjectPlanner implements ProjectPlanner {
             }
         }
         return graph;
+    }
+
+    /**
+     * Run the Business Analyst to turn the raw request into a specification. Best-effort: if BA isn't
+     * configured or returns nothing usable, planning proceeds on the raw request.
+     */
+    private String elicitSpecification(String projectId, OrchestrationEngine.ProjectRequest request) {
+        if (!agentFactory.supports(AgentRole.BUSINESS_ANALYST)) {
+            return "";
+        }
+        try {
+            Agent ba = agentFactory.create(AgentRole.BUSINESS_ANALYST);
+            Task baTask = newTask(TaskId.random(), "Clarify requirements",
+                    request.featureRequest(), AgentRole.BUSINESS_ANALYST);
+            Agent.Response r = ba.handle(
+                    new Agent.Request(baTask, request.featureRequest(), Map.of(), Map.of()),
+                    new Agent.Context(projectId, baTask.id().value(), Map.of()));
+            Object spec = r.structuredOutput().get("specification");
+            return spec != null ? spec.toString() : "";
+        } catch (RuntimeException e) {
+            return ""; // never let requirements-gathering crash planning
+        }
     }
 
     @SuppressWarnings("unchecked")

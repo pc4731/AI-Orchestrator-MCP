@@ -120,9 +120,11 @@ public class InfrastructureConfig {
     public TaskProcessor taskProcessor(AgentFactory agentFactory,
                                        ArtifactRepository artifactRepository,
                                        AuditLog auditLog,
-                                       WorkspaceProperties workspace) {
+                                       WorkspaceProperties workspace,
+                                       BudgetProperties budgets) {
+        int maxRework = budgets.bugLoop() != null ? budgets.bugLoop().maxRetries() : 2;
         return new AgentTaskProcessor(agentFactory, artifactRepository, auditLog,
-                workspace.repoDir(), workspace.testCommand());
+                workspace.repoDir(), workspace.testCommand(), maxRework);
     }
 
     @Bean(destroyMethod = "shutdown")

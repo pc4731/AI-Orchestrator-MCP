@@ -61,10 +61,12 @@ class AgentTaskProcessorTest {
         };
     }
 
+    /** Factory that serves only the given agent's role, so the Prompt Engineer pre-step (which
+     *  checks supports(PROMPT_ENGINEER)) is correctly skipped in these focused tests. */
     private static AgentFactory factoryReturning(Agent agent) {
         return new AgentFactory() {
             @Override public Agent create(AgentRole role) { return agent; }
-            @Override public boolean supports(AgentRole role) { return true; }
+            @Override public boolean supports(AgentRole role) { return role == agent.role(); }
             @Override public Set<AgentRole> supportedRoles() { return Set.of(agent.role()); }
         };
     }
@@ -91,7 +93,7 @@ class AgentTaskProcessorTest {
         AgentTaskProcessor processor = new AgentTaskProcessor(
                 factoryReturning(capturingAgent(seen)),
                 new JGitArtifactRepository(repoDir), new InMemoryAuditLog(),
-                "/work/repo", List.of("npm", "test"));
+                "/work/repo", List.of("npm", "test"), 0);
 
         Task task = new Task(new TaskId("t1"), "QA", "", AgentRole.QA_ENGINEER,
                 WorkflowState.PENDING, List.of(), Map.of(), Instant.now(), Instant.now());
@@ -107,7 +109,7 @@ class AgentTaskProcessorTest {
         AgentTaskProcessor processor = new AgentTaskProcessor(
                 factoryReturning(capturingAgent(seen)),
                 new JGitArtifactRepository(repoDir), new InMemoryAuditLog(),
-                "/work/repo", List.of("./gradlew", "test"));
+                "/work/repo", List.of("./gradlew", "test"), 0);
 
         Task task = new Task(new TaskId("t1"), "QA", "", AgentRole.QA_ENGINEER,
                 WorkflowState.PENDING, List.of(), Map.of("testCommand", List.of("pytest")),
@@ -115,5 +117,65 @@ class AgentTaskProcessorTest {
         processor.process("p1", task);
 
         assertEquals(List.of("pytest"), seen.get().parameters().get("testCommand"));
+    }
+
+    @Test
+    void reworksWhenNeedsReviewThenAcceptsImprovedResult() {
+        java.util.concurrent.atomic.AtomicInteger runs = new java.util.concurrent.atomic.AtomicInteger();
+        java.util.List<String> feedbackSeen = new java.util.ArrayList<>();
+        Agent flaky = new Agent() {
+            @Override public AgentId id() { return new AgentId("dev"); }
+            @Override public AgentRole role() { return AgentRole.BACKEND_DEVELOPER; }
+            @Override public Set<Capability> capabilities() { return Set.of(Capability.WRITE_CODE); }
+            @Override public boolean canHandle(Task task) { return true; }
+            @Override public Response handle(Request request, Context context) {
+                feedbackSeen.add(request.inputArtifacts().getOrDefault("reviewFeedback", "<none>"));
+                // First pass needs review; second pass is good.
+                if (runs.getAndIncrement() == 0) {
+                    return new Response(Outcome.NEEDS_REVIEW, Map.of(), List.of(),
+                            Confidence.MEDIUM, List.of(), Optional.of("incomplete: build every component"));
+                }
+                return new Response(Outcome.COMPLETED, Map.of(), List.of(),
+                        Confidence.HIGH, List.of(), Optional.empty());
+            }
+        };
+        AgentTaskProcessor processor = new AgentTaskProcessor(
+                factoryReturning(flaky), new JGitArtifactRepository(repoDir), new InMemoryAuditLog(),
+                ".", List.of("./gradlew", "test"), 2);
+
+        Task task = new Task(new TaskId("t1"), "Implement", "build it", AgentRole.BACKEND_DEVELOPER,
+                WorkflowState.PENDING, List.of(), Map.of(), Instant.now(), Instant.now());
+        Agent.Response response = processor.process("p1", task);
+
+        assertEquals(Agent.Outcome.COMPLETED, response.outcome());
+        assertEquals(2, runs.get(), "should re-run once after NEEDS_REVIEW");
+        // The rework pass received the reviewer's feedback as grounding.
+        assertEquals("incomplete: build every component", feedbackSeen.get(1));
+    }
+
+    @Test
+    void stopsReworkingAfterMaxAttempts() {
+        java.util.concurrent.atomic.AtomicInteger runs = new java.util.concurrent.atomic.AtomicInteger();
+        Agent alwaysNeedsReview = new Agent() {
+            @Override public AgentId id() { return new AgentId("dev"); }
+            @Override public AgentRole role() { return AgentRole.BACKEND_DEVELOPER; }
+            @Override public Set<Capability> capabilities() { return Set.of(Capability.WRITE_CODE); }
+            @Override public boolean canHandle(Task task) { return true; }
+            @Override public Response handle(Request request, Context context) {
+                runs.incrementAndGet();
+                return new Response(Outcome.NEEDS_REVIEW, Map.of(), List.of(),
+                        Confidence.LOW, List.of(), Optional.of("still not good"));
+            }
+        };
+        AgentTaskProcessor processor = new AgentTaskProcessor(
+                factoryReturning(alwaysNeedsReview), new JGitArtifactRepository(repoDir),
+                new InMemoryAuditLog(), ".", List.of("./gradlew", "test"), 2);
+
+        Task task = new Task(new TaskId("t1"), "Implement", "build it", AgentRole.BACKEND_DEVELOPER,
+                WorkflowState.PENDING, List.of(), Map.of(), Instant.now(), Instant.now());
+        Agent.Response response = processor.process("p1", task);
+
+        assertEquals(Agent.Outcome.NEEDS_REVIEW, response.outcome());
+        assertEquals(3, runs.get(), "initial run + 2 rework attempts");
     }
 }

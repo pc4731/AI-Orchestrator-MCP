@@ -2,6 +2,7 @@ package com.orchestration.engine;
 
 import com.orchestration.agent.Agent;
 import com.orchestration.agent.AgentFactory;
+import com.orchestration.agent.AgentRole;
 import com.orchestration.artifact.ArtifactRepository;
 import com.orchestration.audit.AuditLog;
 import com.orchestration.task.Task;
@@ -18,10 +19,19 @@ import java.util.UUID;
  * it, commits any produced artifacts to the Git-backed repository, and records the prompt/response
  * in the audit log. The engine's dispatch loop calls this for every ready task.
  *
- * <p>It injects two execution parameters into every agent request so QA runs against the real
- * generated code: {@code workingDir} (the Git-backed repo) and {@code testCommand} (the project's
- * default test command). A task's own metadata takes precedence, so the Team Lead can override the
- * test command per task (e.g. {@code [npm, test]} for a Node project).
+ * <p>Two quality mechanisms wrap each worker:
+ * <ul>
+ *   <li><b>Prompt Engineer pre-step</b> — before a building/design/review agent runs, the
+ *       PROMPT_ENGINEER (if configured) refines the task into a crisp prompt with explicit
+ *       acceptance criteria, which is passed to the worker as grounding.</li>
+ *   <li><b>Rework loop</b> — when a worker returns {@code NEEDS_REVIEW}, the task is re-run with the
+ *       reviewer's feedback up to {@code maxReworkAttempts} times, so the team iterates toward a
+ *       result that meets the criteria instead of accepting a weak first pass. Only the final
+ *       outcome is returned to the engine.</li>
+ * </ul>
+ *
+ * <p>It also injects {@code workingDir} (the Git-backed repo) and {@code testCommand} into every
+ * request so QA runs against the real generated code; a task's own metadata takes precedence.
  */
 public class AgentTaskProcessor implements TaskProcessor {
 
@@ -30,58 +40,116 @@ public class AgentTaskProcessor implements TaskProcessor {
     private final AuditLog auditLog;
     private final String workingDir;
     private final List<String> defaultTestCommand;
+    private final int maxReworkAttempts;
 
-    /** Convenience for tests: working dir "." and a Gradle test command. */
+    /** Convenience for tests: working dir ".", Gradle test command, 2 rework attempts. */
     public AgentTaskProcessor(AgentFactory agentFactory,
                               ArtifactRepository artifactRepository,
                               AuditLog auditLog) {
-        this(agentFactory, artifactRepository, auditLog, ".", List.of("./gradlew", "test"));
+        this(agentFactory, artifactRepository, auditLog, ".", List.of("./gradlew", "test"), 2);
     }
 
     public AgentTaskProcessor(AgentFactory agentFactory,
                               ArtifactRepository artifactRepository,
                               AuditLog auditLog,
                               String workingDir,
-                              List<String> defaultTestCommand) {
+                              List<String> defaultTestCommand,
+                              int maxReworkAttempts) {
         this.agentFactory = Objects.requireNonNull(agentFactory, "agentFactory");
         this.artifactRepository = Objects.requireNonNull(artifactRepository, "artifactRepository");
         this.auditLog = Objects.requireNonNull(auditLog, "auditLog");
         this.workingDir = Objects.requireNonNull(workingDir, "workingDir");
         this.defaultTestCommand = List.copyOf(defaultTestCommand);
+        this.maxReworkAttempts = Math.max(0, maxReworkAttempts);
     }
 
     @Override
     public Agent.Response process(String projectId, Task task) {
         Agent agent = agentFactory.create(task.assignedRole());
-        audit(projectId, task, agent, AuditLog.EventType.PROMPT, "Dispatching to " + agent.role());
 
-        // Merge execution defaults under the task's own metadata (metadata wins).
-        Map<String, Object> parameters = new LinkedHashMap<>();
-        parameters.put("workingDir", workingDir);
-        parameters.put("testCommand", defaultTestCommand);
-        parameters.putAll(task.metadata());
+        // Prompt Engineer pre-step: refine the task prompt for worker roles.
+        String refinedPrompt = refinePrompt(projectId, task);
 
-        Agent.Request request = new Agent.Request(task, task.description(), Map.of(), parameters);
-        Agent.Context context = new Agent.Context(projectId, task.id().value(), Map.of());
-        Agent.Response response = agent.handle(request, context);
+        Map<String, Object> baseParams = new LinkedHashMap<>();
+        baseParams.put("workingDir", workingDir);
+        baseParams.put("testCommand", defaultTestCommand);
+        baseParams.putAll(task.metadata());
 
-        commitArtifacts(task, agent, response);
-        audit(projectId, task, agent, AuditLog.EventType.RESPONSE,
-                "outcome=" + response.outcome() + ", confidence=" + response.confidence()
-                        + ", artifacts=" + response.artifacts().size());
+        Agent.Response response = null;
+        String reviewFeedback = null;
+
+        // Initial run plus up to maxReworkAttempts re-runs while the work needs review.
+        for (int attempt = 0; attempt <= maxReworkAttempts; attempt++) {
+            Map<String, String> grounding = new LinkedHashMap<>();
+            if (!refinedPrompt.isBlank()) {
+                grounding.put("refinedPrompt", refinedPrompt);
+            }
+            if (reviewFeedback != null) {
+                grounding.put("reviewFeedback", reviewFeedback);
+            }
+            String instructions = task.description()
+                    + (attempt > 0 ? "\n\nThis is rework attempt " + attempt
+                        + ". Address the reviewFeedback and meet the acceptance criteria." : "");
+
+            audit(projectId, task, agent, AuditLog.EventType.PROMPT,
+                    (attempt == 0 ? "Dispatching to " : "Rework #" + attempt + " for ") + agent.role());
+
+            Agent.Request request = new Agent.Request(task, instructions, grounding, baseParams);
+            Agent.Context context = new Agent.Context(projectId, task.id().value(), Map.of());
+            response = agent.handle(request, context);
+            commitArtifacts(task, agent, response, attempt);
+
+            audit(projectId, task, agent, AuditLog.EventType.RESPONSE,
+                    "outcome=" + response.outcome() + ", confidence=" + response.confidence()
+                            + ", artifacts=" + response.artifacts().size()
+                            + (attempt > 0 ? " (rework #" + attempt + ")" : ""));
+
+            if (response.outcome() != Agent.Outcome.NEEDS_REVIEW || attempt == maxReworkAttempts) {
+                break;
+            }
+            reviewFeedback = response.escalationReason()
+                    .orElse("The previous result did not meet the acceptance criteria; improve it.");
+        }
         return response;
     }
 
-    private void commitArtifacts(Task task, Agent agent, Agent.Response response) {
+    /** Run the Prompt Engineer to sharpen the prompt for worker roles; empty for non-worker roles
+     *  or when PROMPT_ENGINEER is not configured. Best-effort — never fails the task. */
+    private String refinePrompt(String projectId, Task task) {
+        if (!needsRefinement(task.assignedRole()) || !agentFactory.supports(AgentRole.PROMPT_ENGINEER)) {
+            return "";
+        }
+        try {
+            Agent pe = agentFactory.create(AgentRole.PROMPT_ENGINEER);
+            String ask = "Target role: " + task.assignedRole() + "\nTask: " + task.title()
+                    + "\nDetails: " + task.description();
+            Agent.Request request = new Agent.Request(task, ask, Map.of(), Map.of());
+            Agent.Response r = pe.handle(request, new Agent.Context(projectId, task.id().value(), Map.of()));
+            Object refined = r.structuredOutput().get("refinedPrompt");
+            return refined != null ? refined.toString() : "";
+        } catch (RuntimeException e) {
+            return "";
+        }
+    }
+
+    private boolean needsRefinement(AgentRole role) {
+        return switch (role) {
+            case PROMPT_ENGINEER, BUSINESS_ANALYST, TEAM_LEAD -> false; // don't refine the meta-roles
+            default -> true;
+        };
+    }
+
+    private void commitArtifacts(Task task, Agent agent, Agent.Response response, int attempt) {
         if (response.artifacts().isEmpty()) {
             return;
         }
         List<ArtifactRepository.FileChange> changes = response.artifacts().stream()
                 .map(a -> new ArtifactRepository.FileChange(a.path(), a.content()))
                 .toList();
+        String suffix = attempt > 0 ? " (rework #" + attempt + ")" : "";
         artifactRepository.write(new ArtifactRepository.WriteRequest(
                 task.id().value(), agent.role().name(),
-                "[" + agent.role() + "] " + task.title(), changes));
+                "[" + agent.role() + "] " + task.title() + suffix, changes));
     }
 
     private void audit(String projectId, Task task, Agent agent, AuditLog.EventType type, String summary) {

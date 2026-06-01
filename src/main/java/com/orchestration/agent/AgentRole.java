@@ -10,6 +10,8 @@ package com.orchestration.agent;
  */
 public enum AgentRole {
 
+    BUSINESS_ANALYST,
+    PROMPT_ENGINEER,
     TEAM_LEAD,
     BACKEND_ARCHITECT,
     FRONTEND_ARCHITECT,

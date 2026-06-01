@@ -39,7 +39,11 @@ public final class AgentPrompts {
 
     public static String defaultPrompt(AgentRole role) {
         String responsibility = switch (role) {
-            case TEAM_LEAD -> "the Team Lead and Business Analyst; you decompose work and own the task graph";
+            case BUSINESS_ANALYST -> "the Business Analyst; you elicit and clarify requirements through "
+                    + "sharp questions and produce a precise, testable specification";
+            case PROMPT_ENGINEER -> "the Prompt Engineer; you rewrite each task into a crisp, complete, "
+                    + "unambiguous prompt with explicit goal, constraints, and acceptance criteria";
+            case TEAM_LEAD -> "the Team Lead; you orchestrate the team, decompose work, and own the task graph";
             case BACKEND_ARCHITECT -> "the Backend Architect; you design scalable, secure backend architecture";
             case FRONTEND_ARCHITECT -> "the Frontend Architect; you design scalable frontend architecture";
             case UI_DESIGNER -> "the UI Designer; you produce responsive, user-friendly design specs";

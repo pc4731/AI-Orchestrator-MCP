@@ -2,11 +2,27 @@
 # `model` accepts a literal model id or one of the aliases defined in llm.yml (opus/sonnet/haiku).
 agents:
   definitions:
+    business-analyst:
+      role: BUSINESS_ANALYST
+      model: opus
+      prompt-file: prompts/business-analyst.md
+      capabilities: [ELICIT_REQUIREMENTS, CLARIFY_REQUIREMENTS]
+      max-output-tokens: 4096
+      temperature: 0.3
+
+    prompt-engineer:
+      role: PROMPT_ENGINEER
+      model: sonnet
+      prompt-file: prompts/prompt-engineer.md
+      capabilities: [REFINE_PROMPT]
+      max-output-tokens: 2048
+      temperature: 0.1
+
     team-lead:
       role: TEAM_LEAD
       model: opus
       prompt-file: prompts/team-lead.md
-      capabilities: [CLARIFY_REQUIREMENTS, DECOMPOSE_TASKS]
+      capabilities: [DECOMPOSE_TASKS]
       max-output-tokens: 4096
       temperature: 0.2
 

@@ -57,6 +57,55 @@ class TeamLeadProjectPlannerTest {
     }
 
     @Test
+    void businessAnalystRunsBeforeTeamLeadAndItsSpecGroundsPlanning() {
+        java.util.List<AgentRole> callOrder = new java.util.ArrayList<>();
+        java.util.concurrent.atomic.AtomicReference<Map<String, String>> tlGrounding =
+                new java.util.concurrent.atomic.AtomicReference<>(Map.of());
+
+        Agent ba = new Agent() {
+            @Override public AgentId id() { return new AgentId("ba"); }
+            @Override public AgentRole role() { return AgentRole.BUSINESS_ANALYST; }
+            @Override public Set<Capability> capabilities() { return Set.of(Capability.ELICIT_REQUIREMENTS); }
+            @Override public boolean canHandle(Task task) { return true; }
+            @Override public Response handle(Request request, Context context) {
+                callOrder.add(AgentRole.BUSINESS_ANALYST);
+                return new Response(Outcome.COMPLETED, Map.of("specification", "SPEC-XYZ"),
+                        List.of(), Confidence.HIGH, List.of(), Optional.empty());
+            }
+        };
+        Agent tl = new Agent() {
+            @Override public AgentId id() { return new AgentId("tl"); }
+            @Override public AgentRole role() { return AgentRole.TEAM_LEAD; }
+            @Override public Set<Capability> capabilities() { return Set.of(Capability.DECOMPOSE_TASKS); }
+            @Override public boolean canHandle(Task task) { return true; }
+            @Override public Response handle(Request request, Context context) {
+                callOrder.add(AgentRole.TEAM_LEAD);
+                tlGrounding.set(request.inputArtifacts());
+                return new Response(Outcome.COMPLETED,
+                        Map.of("tasks", List.of(Map.of("id", "t1", "title", "Build",
+                                "role", "BACKEND_DEVELOPER", "dependsOn", List.of()))),
+                        List.of(), Confidence.HIGH, List.of(), Optional.empty());
+            }
+        };
+        AgentFactory factory = new AgentFactory() {
+            @Override public Agent create(AgentRole role) {
+                return role == AgentRole.BUSINESS_ANALYST ? ba : tl;
+            }
+            @Override public boolean supports(AgentRole role) {
+                return role == AgentRole.BUSINESS_ANALYST || role == AgentRole.TEAM_LEAD;
+            }
+            @Override public Set<AgentRole> supportedRoles() {
+                return Set.of(AgentRole.BUSINESS_ANALYST, AgentRole.TEAM_LEAD);
+            }
+        };
+
+        new TeamLeadProjectPlanner(factory).plan("p1", request());
+
+        assertEquals(List.of(AgentRole.BUSINESS_ANALYST, AgentRole.TEAM_LEAD), callOrder);
+        assertEquals("SPEC-XYZ", tlGrounding.get().get("specification"));
+    }
+
+    @Test
     void fallsBackToASingleTeamLeadTaskWhenNoTasksReturned() {
         Agent.Response response = new Agent.Response(Agent.Outcome.INSUFFICIENT_INFORMATION,
                 Map.of(), List.of(), Agent.Confidence.LOW, List.of(), Optional.of("too vague"));
