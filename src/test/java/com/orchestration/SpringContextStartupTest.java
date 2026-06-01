@@ -22,16 +22,19 @@ class SpringContextStartupTest {
     private SpringApplication app(String profile) {
         SpringApplication app = new SpringApplication(OrchestrationApplication.class);
         app.setAdditionalProfiles(profile);
-        app.setDefaultProperties(Map.of(
-                "server.port", "0",
-                "memory.sqlite.path", ":memory:"));
+        app.setDefaultProperties(Map.of("memory.sqlite.path", ":memory:"));
         return app;
     }
+
+    // Command-line args outrank profile yml; default properties do not. The mcp profile pins
+    // server.port=8090, so forcing the random port (0) here is the only way to actually avoid
+    // colliding with anything already bound to that port.
+    private static final String[] RANDOM_PORT = {"--server.port=0"};
 
     @Test
     void mcpProfileContextStartsWithAllAgentBeans() {
         System.setProperty("MCP_DISABLE_RUNNER", "true");
-        try (ConfigurableApplicationContext ctx = app("mcp").run()) {
+        try (ConfigurableApplicationContext ctx = app("mcp").run(RANDOM_PORT)) {
             assertTrue(ctx.isActive());
             assertTrue(ctx.containsBean("agentFactory"));
             assertTrue(ctx.containsBean("skillRegistry"));
@@ -43,7 +46,7 @@ class SpringContextStartupTest {
 
     @Test
     void uiProfileContextStartsWithWebBeans() {
-        try (ConfigurableApplicationContext ctx = app("ui").run()) {
+        try (ConfigurableApplicationContext ctx = app("ui").run(RANDOM_PORT)) {
             assertTrue(ctx.isActive());
             assertTrue(ctx.containsBean("projectController"));
             assertTrue(ctx.containsBean("skillRegistry"));

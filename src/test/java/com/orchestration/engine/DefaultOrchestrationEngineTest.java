@@ -129,6 +129,24 @@ class DefaultOrchestrationEngineTest {
         assertTrue(engine.status(handle.projectId()).pendingGates().isEmpty());
     }
 
+    @Test
+    void failedTaskMarksProjectFailedNotDone() throws Exception {
+        FakeMemoryStore memory = new FakeMemoryStore();
+        TaskProcessor processor = (projectId, task) -> response(Agent.Outcome.FAILED);
+        ProjectPlanner singleTask = (projectId, request) -> {
+            InMemoryTaskGraph graph = new InMemoryTaskGraph();
+            graph.addTask(pendingTask("only", AgentRole.QA_ENGINEER));
+            return graph;
+        };
+        DefaultOrchestrationEngine engine =
+                new DefaultOrchestrationEngine(singleTask, processor, memory, new FakeAuditLog());
+
+        var handle = engine.submit(new OrchestrationEngine.ProjectRequest("build X", Map.of(), Optional.empty()));
+
+        // The lone task FAILED — even though every task is now terminal, the project must NOT be DONE.
+        assertEquals(WorkflowState.FAILED, engine.awaitSettled(handle.projectId(), TIMEOUT));
+    }
+
     // ------------------------------------------------------------------------
     // Test doubles
     // ------------------------------------------------------------------------

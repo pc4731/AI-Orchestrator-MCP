@@ -93,6 +93,20 @@ public class McpAgent implements Agent {
                             + "specific questions in output.questions — ASK THE USER, incorporate the "
                             + "answers, and only then produce a precise, testable specification in "
                             + "output.specification with explicit acceptance criteria.";
+            case MARKET_RESEARCHER ->
+                    "Research the market for the planned functionality using your web tools (WebSearch/"
+                            + "WebFetch). Find comparable/competing tools, study their reviews, issue "
+                            + "trackers, and forum threads, and identify the RECURRING COMPLAINTS users "
+                            + "have about them. Then turn that into action for THIS build. Return: "
+                            + "output.competitors (a list of {name, url, summary}); output.complaints (a "
+                            + "list of {complaint, source} of the most common pain points in similar "
+                            + "tools); output.recommendedFeatures (a list of {feature, rationale, priority "
+                            + "HIGH|MEDIUM|LOW} — features worth adding, including ones that fix those "
+                            + "complaints); and output.plan (concrete steps the team should take so the "
+                            + "final product avoids those complaints and ships the high-value features). "
+                            + "Put a short narrative in output.summary. Cite real sources you actually "
+                            + "fetched; never invent URLs or quotes — if web access is unavailable, say so "
+                            + "and base recommendations on well-known patterns instead.";
             case PROMPT_ENGINEER ->
                     "Rewrite the downstream task into a crisp, self-contained prompt for the named "
                             + "target role. In output.refinedPrompt give: the goal, the concrete inputs "
@@ -103,11 +117,17 @@ public class McpAgent implements Agent {
                     "Decompose the agreed specification into concrete, role-assigned tasks (the "
                             + "Business Analyst has already clarified requirements; if the spec is still "
                             + "ambiguous, set INSUFFICIENT_INFORMATION with questions in output.questions "
-                            + "rather than guessing). Cover the FULL scope: a UI_DESIGNER task when there "
-                            + "is a UI, a DBA task for meaningful data, a SECURITY_REVIEWER task when "
-                            + "handling user data, and a QA_ENGINEER task that verifies the result "
-                            + "matches the acceptance criteria. Add review dependencies so work is "
-                            + "checked, not just produced. Record decisions in output.assumptions.";
+                            + "rather than guessing). Fold in the Market Researcher's recommendedFeatures "
+                            + "and plan (provided as grounding) so the build is feature-rich and avoids "
+                            + "the complaints common to similar tools. Cover the FULL scope: a UI_DESIGNER "
+                            + "task when there is a UI, a DBA task for meaningful data, a SECURITY_REVIEWER "
+                            + "task when handling user data, and a QA_ENGINEER task that verifies the "
+                            + "result matches the acceptance criteria AND that the project builds green. "
+                            + "ALWAYS include a final documentation task (assigned to a developer) that "
+                            + "produces a RUN.md at the repo root with exact steps to install, build, run, "
+                            + "and test the app — make it depend on all implementation tasks. Add review "
+                            + "dependencies so work is checked, not just produced. Record decisions in "
+                            + "output.assumptions.";
             case BACKEND_ARCHITECT ->
                     "Produce the backend architecture in output: chosen patterns, components, tech "
                             + "stack (with rationale), data model, failure modes, and security "
@@ -120,6 +140,29 @@ public class McpAgent implements Agent {
                             + "backend and the UI design. Put implementable instructions for the "
                             + "frontend developer in output.instructions. Address accessibility and "
                             + "performance. Do not write application code.";
+            case AI_ML_ARCHITECT ->
+                    "Design the AI/ML capability — but FIRST decide whether it even needs AI. If the "
+                            + "feature can be met with conventional, deterministic libraries (e.g. a rules "
+                            + "engine, full-text search, regex/NLP libs, classical ML offline), you MUST "
+                            + "set status INSUFFICIENT_INFORMATION and put questions in output.questions "
+                            + "asking the user to choose: (a) the AI-powered approach — which REQUIRES an "
+                            + "AI API key and ongoing cost — or (b) the non-AI library approach; state the "
+                            + "trade-offs (cost, latency, accuracy, privacy, offline). If the AI approach "
+                            + "is chosen or AI is genuinely required, ALSO ask which model/provider to use "
+                            + "— Anthropic, OpenAI, Google Gemini, or another (and note they must supply "
+                            + "that provider's API key). Only once the user has answered, produce the "
+                            + "architecture in output.instructions: chosen provider+model, prompt/inference "
+                            + "design, data flow, fallbacks, evaluation, cost/latency, and API-key handling "
+                            + "(read from env/config, NEVER hardcoded). Do not write application code.";
+            case AI_ML_DEVELOPER ->
+                    "Implement the AI/ML feature exactly as the AI/ML Architect specified — using the "
+                            + "chosen provider's official SDK, or the agreed non-AI library if that path "
+                            + "was selected. Read the API key from environment/config and fail gracefully "
+                            + "with a clear message when it is absent; NEVER hardcode keys or commit "
+                            + "secrets. Build it for real (no stubbed model responses in the product). "
+                            + "Return all files as artifacts INCLUDING tests that MOCK external model "
+                            + "calls (never hit a paid API in tests). Document the required API key and how "
+                            + "to set it in RUN.md. Summarize in output.summary.";
             case UI_DESIGNER ->
                     "Produce a UI design spec in output: layout, component inventory, interaction "
                             + "patterns, and an explicit theme — color palette (with light/dark), type "
@@ -135,6 +178,33 @@ public class McpAgent implements Agent {
                             + "output.findings as a list of {issue, severity, remediation}. Check "
                             + "authn/authz, input validation, secrets handling, dependency risk, and "
                             + "data exposure. Set status NEEDS_REVIEW if there are blocking issues.";
+            case CODE_REVIEWER ->
+                    "Review the implemented code (provided as grounding from the developers) for "
+                            + "correctness, readability, maintainability, naming, error handling, test "
+                            + "coverage, and adherence to the project's conventions and the acceptance "
+                            + "criteria — this is a quality review, distinct from the security audit. Put "
+                            + "findings in output.findings as a list of {file, issue, severity, "
+                            + "suggestion}, and a short verdict in output.summary. Set status "
+                            + "NEEDS_REVIEW (with specifics) if there are blocking quality issues so the "
+                            + "developer reworks them; otherwise COMPLETED. Do not rewrite the app "
+                            + "yourself.";
+            case CONTENT_WRITER ->
+                    "Write the product's copy from the spec and design: UI strings/microcopy, empty/error "
+                            + "states, onboarding, help/docs, and any marketing content requested. Match a "
+                            + "consistent voice and the target audience, keep it accurate (never invent "
+                            + "facts/claims), and make it accessible (plain language, descriptive link "
+                            + "text, alt-text suggestions). Return the copy as artifacts where it belongs "
+                            + "in the repo (e.g. content files, README/docs, i18n strings) and summarize "
+                            + "in output.summary. Coordinate with the SEO Expert on terminology.";
+            case SEO_EXPERT ->
+                    "Optimise the content and markup for search visibility WITHOUT harming UX or "
+                            + "accessibility. Provide: output.keywords (primary/secondary with intent), "
+                            + "per-page output.metadata (title ≤60 chars, meta description ≤155, canonical, "
+                            + "Open Graph/Twitter, structured-data/JSON-LD suggestions), and "
+                            + "output.recommendations for semantic HTML (heading hierarchy, alt text, "
+                            + "internal linking, sitemap/robots). Where you change files (meta tags, "
+                            + "sitemap.xml, robots.txt), return them as artifacts. Ground keywords in the "
+                            + "real product; never keyword-stuff.";
             case BACKEND_DEVELOPER, FRONTEND_DEVELOPER ->
                     "Implement the code AND its automated tests from the architect's (and designer's) "
                             + "spec. BUILD IT FOR REAL — reconstruct every component faithfully as actual "
@@ -143,13 +213,21 @@ public class McpAgent implements Agent {
                             + "refined prompt. Return every file you create or change in the artifacts "
                             + "array (repository-relative path + full content), INCLUDING test files that "
                             + "cover each feature (happy path + key edge cases) and run under the "
-                            + "project's standard test command. Use only declared, verifiable "
-                            + "dependencies; never invent APIs. Summarize in output.summary.";
+                            + "project's standard test command. The project MUST build and the tests MUST "
+                            + "pass before you report COMPLETED — if a build error (provided as the "
+                            + "buildFailure grounding) is given, fix it for real and return the corrected "
+                            + "files. When asked to write run instructions, produce a RUN.md at the repo "
+                            + "root covering install, build, run, and test steps. Use only declared, "
+                            + "verifiable dependencies; never invent APIs. Summarize in output.summary.";
             case QA_ENGINEER ->
                     "Verify the implementation by actually RUNNING the project's test command in the "
-                            + "repo (use the testCommand and workingDir provided), not by reasoning. "
-                            + "Report the real result; if there are no tests or they don't exercise the "
-                            + "features, say so and set status NEEDS_REVIEW. Use NEEDS_REVIEW with "
+                            + "repo (use the testCommand and workingDir provided), not by reasoning. The "
+                            + "project MUST build/compile and the tests MUST pass: if the build is broken "
+                            + "or tests fail, set status NEEDS_REVIEW with the exact error output — a "
+                            + "broken build must never pass review (a developer will be re-dispatched to "
+                            + "fix it). Also confirm a RUN.md with build/run/test steps exists at the repo "
+                            + "root; if it is missing, set NEEDS_REVIEW. If there are no tests or they "
+                            + "don't exercise the features, say so and set NEEDS_REVIEW. Always include "
                             + "reproducible details on any failure.";
         };
     }
@@ -164,8 +242,12 @@ public class McpAgent implements Agent {
             return base + "\nFor decomposition, put tasks in output.tasks: "
                     + "[{\"id\":\"t1\",\"title\":\"...\",\"description\":\"...\","
                     + "\"role\":\"BACKEND_ARCHITECT\",\"dependsOn\":[\"t0\"]}] "
-                    + "(roles: TEAM_LEAD, BACKEND_ARCHITECT, FRONTEND_ARCHITECT, UI_DESIGNER, "
-                    + "BACKEND_DEVELOPER, FRONTEND_DEVELOPER, QA_ENGINEER, DBA, SECURITY_REVIEWER).";
+                    + "(roles: TEAM_LEAD, MARKET_RESEARCHER, BACKEND_ARCHITECT, FRONTEND_ARCHITECT, "
+                    + "AI_ML_ARCHITECT, UI_DESIGNER, BACKEND_DEVELOPER, FRONTEND_DEVELOPER, "
+                    + "AI_ML_DEVELOPER, QA_ENGINEER, DBA, SECURITY_REVIEWER, CODE_REVIEWER, "
+                    + "CONTENT_WRITER, SEO_EXPERT). Only add the AI_ML_* roles when the app actually "
+                    + "needs AI/ML — the AI/ML Architect will confirm AI-vs-library and the provider "
+                    + "with the user.";
         }
         return base;
     }

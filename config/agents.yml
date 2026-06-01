@@ -10,6 +10,14 @@ agents:
       max-output-tokens: 4096
       temperature: 0.3
 
+    market-researcher:
+      role: MARKET_RESEARCHER
+      model: opus
+      prompt-file: prompts/market-researcher.md
+      capabilities: [MARKET_RESEARCH]
+      max-output-tokens: 4096
+      temperature: 0.4
+
     prompt-engineer:
       role: PROMPT_ENGINEER
       model: sonnet
@@ -42,6 +50,14 @@ agents:
       max-output-tokens: 8192
       temperature: 0.2
 
+    ai-ml-architect:
+      role: AI_ML_ARCHITECT
+      model: opus
+      prompt-file: prompts/ai-ml-architect.md
+      capabilities: [DESIGN_ARCHITECTURE]
+      max-output-tokens: 8192
+      temperature: 0.2
+
     ui-designer:
       role: UI_DESIGNER
       model: sonnet
@@ -64,6 +80,14 @@ agents:
       model: sonnet
       prompt-file: prompts/frontend-developer.md
       skills: [accessibility, modern-ui]
+      capabilities: [WRITE_CODE, EXECUTE_TOOLS]
+      max-output-tokens: 8192
+      temperature: 0.1
+
+    ai-ml-developer:
+      role: AI_ML_DEVELOPER
+      model: sonnet
+      prompt-file: prompts/ai-ml-developer.md
       capabilities: [WRITE_CODE, EXECUTE_TOOLS]
       max-output-tokens: 8192
       temperature: 0.1
@@ -91,3 +115,29 @@ agents:
       capabilities: [SECURITY_AUDIT, REVIEW_CODE]
       max-output-tokens: 4096
       temperature: 0.1
+
+    code-reviewer:
+      role: CODE_REVIEWER
+      model: opus
+      prompt-file: prompts/code-reviewer.md
+      capabilities: [REVIEW_CODE]
+      max-output-tokens: 4096
+      temperature: 0.1
+
+    content-writer:
+      role: CONTENT_WRITER
+      model: sonnet
+      prompt-file: prompts/content-writer.md
+      capabilities: [WRITE_CONTENT]
+      skills: [accessibility]
+      max-output-tokens: 4096
+      temperature: 0.5
+
+    seo-expert:
+      role: SEO_EXPERT
+      model: sonnet
+      prompt-file: prompts/seo-expert.md
+      capabilities: [OPTIMIZE_SEO]
+      skills: [accessibility]
+      max-output-tokens: 4096
+      temperature: 0.3

@@ -1,5 +1,7 @@
 package com.orchestration.config;
 
+import com.orchestration.agent.AgentRole;
+import com.orchestration.agent.Capability;
 import com.orchestration.llm.LlmClient;
 import com.orchestration.tools.SandboxSettings;
 import org.junit.jupiter.api.Test;
@@ -41,6 +43,24 @@ class ConfigurationBindingTest {
             assertThat(teamLead.role()).isEqualTo("TEAM_LEAD");
             assertThat(teamLead.model()).isEqualTo("opus");
             assertThat(teamLead.capabilities()).contains("DECOMPOSE_TASKS");
+
+            // The newer agents are wired in.
+            assertThat(agents.definitions()).containsKeys(
+                    "market-researcher", "code-reviewer", "content-writer", "seo-expert");
+        });
+    }
+
+    /** Guards every agents.yml entry against role/capability typos — they only fail at create()
+     *  time otherwise, which Spring binding does not exercise. */
+    @Test
+    void everyAgentDefinitionUsesValidRolesAndCapabilities() {
+        runner.run(context -> {
+            AgentsProperties agents = context.getBean(AgentsProperties.class);
+            assertThat(agents.definitions()).isNotEmpty();
+            agents.definitions().forEach((name, def) -> {
+                AgentRole.valueOf(def.role()); // throws if the role is unknown
+                def.capabilities().forEach(Capability::valueOf); // throws if a capability is unknown
+            });
         });
     }
 

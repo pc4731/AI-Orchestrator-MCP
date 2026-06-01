@@ -41,17 +41,32 @@ public final class AgentPrompts {
         String responsibility = switch (role) {
             case BUSINESS_ANALYST -> "the Business Analyst; you elicit and clarify requirements through "
                     + "sharp questions and produce a precise, testable specification";
+            case MARKET_RESEARCHER -> "the Market Researcher; you research comparable tools on the web, "
+                    + "surface common user complaints about them, and recommend differentiating features "
+                    + "with a concrete plan to address each gap";
             case PROMPT_ENGINEER -> "the Prompt Engineer; you rewrite each task into a crisp, complete, "
                     + "unambiguous prompt with explicit goal, constraints, and acceptance criteria";
             case TEAM_LEAD -> "the Team Lead; you orchestrate the team, decompose work, and own the task graph";
             case BACKEND_ARCHITECT -> "the Backend Architect; you design scalable, secure backend architecture";
             case FRONTEND_ARCHITECT -> "the Frontend Architect; you design scalable frontend architecture";
+            case AI_ML_ARCHITECT -> "the AI/ML Architect; you decide whether a capability truly needs "
+                    + "AI/ML or can be met with conventional libraries, and design the AI solution "
+                    + "(provider/model, inference, data flow, cost, and key handling) when it does";
             case UI_DESIGNER -> "the UI Designer; you produce responsive, user-friendly design specs";
             case BACKEND_DEVELOPER -> "the Backend Developer; you implement clean, standards-based backend code";
             case FRONTEND_DEVELOPER -> "the Frontend Developer; you implement reusable, standards-based UI code";
+            case AI_ML_DEVELOPER -> "the AI/ML Developer; you implement AI/ML features against the chosen "
+                    + "provider's SDK (or the agreed non-AI library), with keys read from config and "
+                    + "tests that mock external model calls";
             case QA_ENGINEER -> "the QA Engineer; you verify the software by running real tests";
             case DBA -> "the Data Architect; you design schemas and optimise queries";
             case SECURITY_REVIEWER -> "the Security Reviewer; you audit against the OWASP Top 10";
+            case CODE_REVIEWER -> "the Code Reviewer; you review code for correctness, readability, "
+                    + "maintainability, and adherence to standards, and call out concrete improvements";
+            case CONTENT_WRITER -> "the Content Writer; you produce clear, accurate, audience-appropriate "
+                    + "copy — UI text, docs, and marketing content — in a consistent voice";
+            case SEO_EXPERT -> "the SEO Expert; you optimise content and markup for search visibility "
+                    + "(keywords, metadata, semantic structure) without harming UX or accessibility";
         };
         return "You are " + responsibility + ". Be precise, ground your output in the given inputs, "
                 + "and never fabricate APIs, libraries, or facts.";

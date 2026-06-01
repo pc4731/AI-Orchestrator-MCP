@@ -10,6 +10,7 @@ package com.orchestration.agent;
 public enum Capability {
 
     ELICIT_REQUIREMENTS,
+    MARKET_RESEARCH,
     REFINE_PROMPT,
     CLARIFY_REQUIREMENTS,
     DECOMPOSE_TASKS,
@@ -20,5 +21,7 @@ public enum Capability {
     RUN_TESTS,
     DESIGN_SCHEMA,
     SECURITY_AUDIT,
+    WRITE_CONTENT,
+    OPTIMIZE_SEO,
     EXECUTE_TOOLS
 }

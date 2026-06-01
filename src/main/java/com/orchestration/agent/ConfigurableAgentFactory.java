@@ -55,7 +55,8 @@ public class ConfigurableAgentFactory implements AgentFactory {
         AgentSpec spec = toSpec(role, definition);
         return switch (role) {
             case TEAM_LEAD -> new TeamLeadAgent(spec, llmClient, budget);
-            case BACKEND_DEVELOPER, FRONTEND_DEVELOPER -> new DeveloperAgent(spec, llmClient, budget);
+            case BACKEND_DEVELOPER, FRONTEND_DEVELOPER, AI_ML_DEVELOPER ->
+                    new DeveloperAgent(spec, llmClient, budget);
             case QA_ENGINEER -> new QaEngineerAgent(spec.id(), role, spec.capabilities(),
                     toolExecutor, DEFAULT_TEST_COMMAND, Duration.ofMinutes(10));
             default -> new GenericLlmAgent(spec, llmClient, budget);

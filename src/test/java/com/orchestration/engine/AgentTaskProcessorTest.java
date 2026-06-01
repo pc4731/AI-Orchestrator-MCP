@@ -24,6 +24,7 @@ import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class AgentTaskProcessorTest {
 
@@ -231,5 +232,65 @@ class AgentTaskProcessorTest {
 
         assertEquals("USE_LAYERED_ARCH",
                 devRequest.get().inputArtifacts().get("from_BACKEND_ARCHITECT"));
+    }
+
+    @Test
+    void qaFailureRedispatchesDeveloperToFixThenPasses() {
+        // QA fails the build once, a developer is re-dispatched to fix it, then QA passes.
+        java.util.concurrent.atomic.AtomicInteger qaRuns = new java.util.concurrent.atomic.AtomicInteger();
+        Agent qa = new Agent() {
+            @Override public AgentId id() { return new AgentId("qa"); }
+            @Override public AgentRole role() { return AgentRole.QA_ENGINEER; }
+            @Override public Set<Capability> capabilities() { return Set.of(Capability.RUN_TESTS); }
+            @Override public boolean canHandle(Task task) { return true; }
+            @Override public Response handle(Request request, Context context) {
+                if (qaRuns.getAndIncrement() == 0) {
+                    return new Response(Outcome.NEEDS_REVIEW,
+                            Map.of("stderr", "compile error: missing semicolon"),
+                            List.of(), Confidence.HIGH, List.of(), Optional.of("build failed"));
+                }
+                return new Response(Outcome.COMPLETED, Map.of("summary", "all green"),
+                        List.of(), Confidence.HIGH, List.of(), Optional.empty());
+            }
+        };
+        AtomicReference<Agent.Request> fixRequest = new AtomicReference<>();
+        java.util.concurrent.atomic.AtomicInteger devRuns = new java.util.concurrent.atomic.AtomicInteger();
+        Agent developer = new Agent() {
+            @Override public AgentId id() { return new AgentId("dev"); }
+            @Override public AgentRole role() { return AgentRole.BACKEND_DEVELOPER; }
+            @Override public Set<Capability> capabilities() { return Set.of(Capability.WRITE_CODE); }
+            @Override public boolean canHandle(Task task) { return true; }
+            @Override public Response handle(Request request, Context context) {
+                devRuns.incrementAndGet();
+                fixRequest.set(request);
+                return new Response(Outcome.COMPLETED, Map.of("summary", "fixed"),
+                        List.of(new Artifact("A.java", "class A {}", "text/plain")),
+                        Confidence.HIGH, List.of(), Optional.empty());
+            }
+        };
+        AgentFactory factory = new AgentFactory() {
+            @Override public Agent create(AgentRole role) {
+                return role == AgentRole.QA_ENGINEER ? qa : developer;
+            }
+            @Override public boolean supports(AgentRole role) {
+                return role == AgentRole.QA_ENGINEER || role == AgentRole.BACKEND_DEVELOPER;
+            }
+            @Override public Set<AgentRole> supportedRoles() {
+                return Set.of(AgentRole.QA_ENGINEER, AgentRole.BACKEND_DEVELOPER);
+            }
+        };
+        AgentTaskProcessor processor = new AgentTaskProcessor(
+                factory, new JGitArtifactRepository(repoDir), new InMemoryAuditLog(),
+                ".", List.of("./gradlew", "test"), 2);
+        Task qaTask = new Task(new TaskId("qa-1"), "Verify", "run tests", AgentRole.QA_ENGINEER,
+                WorkflowState.PENDING, List.of(), Map.of(), Instant.now(), Instant.now());
+
+        Agent.Response response = processor.process("p1", qaTask);
+
+        assertEquals(Agent.Outcome.COMPLETED, response.outcome());
+        assertEquals(1, devRuns.get());                 // developer dispatched exactly once to fix
+        assertEquals(2, qaRuns.get());                  // QA ran, failed, then re-verified green
+        assertTrue(fixRequest.get().inputArtifacts().get("buildFailure")
+                .contains("compile error: missing semicolon"));   // the failure reached the developer
     }
 }

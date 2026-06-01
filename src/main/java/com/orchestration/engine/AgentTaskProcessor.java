@@ -7,6 +7,7 @@ import com.orchestration.artifact.ArtifactRepository;
 import com.orchestration.audit.AuditLog;
 import com.orchestration.task.Task;
 import com.orchestration.task.TaskId;
+import com.orchestration.task.WorkflowState;
 
 import java.time.Instant;
 import java.util.LinkedHashMap;
@@ -90,6 +91,22 @@ public class AgentTaskProcessor implements TaskProcessor {
         // Collaboration: gather the outputs of this task's completed dependencies as grounding.
         Map<String, String> upstream = upstreamHandoffs(task);
 
+        // QA verification gets a build-fix loop (re-run a developer on failure) instead of the
+        // generic rework loop, since re-running QA on a red build would change nothing.
+        Agent.Response response = agent.role() == AgentRole.QA_ENGINEER
+                ? verifyWithBuildFix(projectId, task, agent, baseParams, upstream)
+                : runWithRework(projectId, task, agent, refinedPrompt, baseParams, upstream);
+
+        // Publish this task's output to the collaboration board for downstream agents.
+        recordHandoff(task, agent, response);
+        return response;
+    }
+
+    /** Initial run plus up to {@code maxReworkAttempts} re-runs of the same agent while it needs
+     *  review, feeding the reviewer's feedback back as grounding. Only the final outcome is returned. */
+    private Agent.Response runWithRework(String projectId, Task task, Agent agent,
+                                         String refinedPrompt, Map<String, Object> baseParams,
+                                         Map<String, String> upstream) {
         Agent.Response response = null;
         String reviewFeedback = null;
 
@@ -141,10 +158,94 @@ public class AgentTaskProcessor implements TaskProcessor {
             reviewFeedback = response.escalationReason()
                     .orElse("The previous result did not meet the acceptance criteria; improve it.");
         }
-
-        // Publish this task's output to the collaboration board for downstream agents.
-        recordHandoff(task, agent, response);
         return response;
+    }
+
+    /**
+     * Run QA, and if the build/tests fail (NEEDS_REVIEW), re-dispatch a developer to fix it for real
+     * with the failure output as grounding, then re-verify — up to {@code maxReworkAttempts} times.
+     * This is what enforces "a broken build is never accepted": either it ends green (COMPLETED) or,
+     * if it can't be fixed, it stays NEEDS_REVIEW so the engine never marks the project DONE.
+     */
+    private Agent.Response verifyWithBuildFix(String projectId, Task task, Agent qa,
+                                              Map<String, Object> baseParams,
+                                              Map<String, String> upstream) {
+        Agent.Response response = dispatch(projectId, task, qa, task.description(), upstream,
+                baseParams, "developers (verifying their build)", "Verifying build for " + qa.role(), 0);
+
+        for (int attempt = 1; attempt <= maxReworkAttempts; attempt++) {
+            if (response.outcome() != Agent.Outcome.NEEDS_REVIEW) {
+                break; // build is green (or an outcome a developer can't fix)
+            }
+            AgentRole devRole = developerToFix(task);
+            if (!agentFactory.supports(devRole)) {
+                break; // no developer available to repair the build
+            }
+            String failure = buildFailureDetail(response);
+            Agent developer = agentFactory.create(devRole);
+            Task fixTask = new Task(TaskId.random(), "Fix failing build", task.description(), devRole,
+                    WorkflowState.IN_PROGRESS, List.of(), Map.of(), Instant.now(), Instant.now());
+            String fixInstructions = "The project does NOT build / its tests FAIL. Fix the code so it "
+                    + "compiles and every test passes; return the corrected files as artifacts.\n\n"
+                    + "Build failure output:\n" + failure;
+            Map<String, String> fixGrounding = new LinkedHashMap<>(upstream);
+            fixGrounding.put("buildFailure", failure);
+            dispatch(projectId, fixTask, developer, fixInstructions, fixGrounding, baseParams,
+                    qa.role().name(), "Build-fix #" + attempt + " by " + devRole, attempt);
+
+            response = dispatch(projectId, task, qa, task.description(), upstream, baseParams,
+                    devRole.name(), "Re-verifying build (attempt " + attempt + ")", attempt);
+        }
+        return response;
+    }
+
+    /** One agent invocation: audit the prompt, run it, commit any artifacts, audit the response. */
+    private Agent.Response dispatch(String projectId, Task task, Agent agent, String instructions,
+                                    Map<String, String> grounding, Map<String, Object> baseParams,
+                                    String collaborator, String summary, int attempt) {
+        audit(projectId, task, agent, AuditLog.EventType.PROMPT, summary,
+                Map.of("role", agent.role().name(), "collaborator", collaborator, "prompt", instructions));
+        Agent.Request request = new Agent.Request(task, instructions, grounding, baseParams);
+        Agent.Context context = new Agent.Context(projectId, task.id().value(), Map.of());
+        Agent.Response response = agent.handle(request, context);
+        commitArtifacts(task, agent, response, attempt);
+        audit(projectId, task, agent, AuditLog.EventType.RESPONSE,
+                "outcome=" + response.outcome() + ", confidence=" + response.confidence()
+                        + ", artifacts=" + response.artifacts().size(),
+                Map.of("role", agent.role().name(), "outcome", response.outcome().name(),
+                        "detail", response.escalationReason().orElse(summarize(response.structuredOutput()))));
+        return response;
+    }
+
+    /** The developer role responsible for the code under test — derived from the QA task's
+     *  completed dependencies, defaulting to the backend developer. */
+    private AgentRole developerToFix(Task task) {
+        for (TaskId dep : task.dependsOn()) {
+            Handoff h = handoffs.get(dep.value());
+            if (h != null && h.role().endsWith("_DEVELOPER")) {
+                try {
+                    return AgentRole.valueOf(h.role());
+                } catch (IllegalArgumentException ignored) {
+                    // fall through to the default
+                }
+            }
+        }
+        return AgentRole.BACKEND_DEVELOPER;
+    }
+
+    /** Extract a compact, developer-actionable failure description from a QA response. */
+    private static String buildFailureDetail(Agent.Response qaResponse) {
+        StringBuilder sb = new StringBuilder();
+        qaResponse.escalationReason().ifPresent(r -> sb.append(r).append('\n'));
+        Object stderr = qaResponse.structuredOutput().get("stderr");
+        Object stdout = qaResponse.structuredOutput().get("stdout");
+        if (stderr != null && !stderr.toString().isBlank()) {
+            sb.append(stderr);
+        } else if (stdout != null) {
+            sb.append(stdout);
+        }
+        String text = sb.toString().strip();
+        return text.length() <= 4000 ? text : text.substring(0, 4000) + "…[truncated]";
     }
 
     /** Collect the outputs of this task's completed dependencies, keyed for prompt grounding. */
@@ -211,7 +312,8 @@ public class AgentTaskProcessor implements TaskProcessor {
 
     private boolean needsRefinement(AgentRole role) {
         return switch (role) {
-            case PROMPT_ENGINEER, BUSINESS_ANALYST, TEAM_LEAD -> false; // don't refine the meta-roles
+            // don't refine the meta-roles (planning/research/QA verification)
+            case PROMPT_ENGINEER, BUSINESS_ANALYST, MARKET_RESEARCHER, TEAM_LEAD, QA_ENGINEER -> false;
             default -> true;
         };
     }

@@ -97,10 +97,19 @@ public class OrchestrationMcpService {
             return response;
         }
         String state = currentState();
-        if ("DONE".equals(state) || "FAILED".equals(state)) {
+        if ("DONE".equals(state)) {
             return Map.of("status", state, "nextAction", "STOP",
-                    "message", "Project " + state + ". Loop complete — summarize the result for the user. "
-                            + "Generated code is committed under data/repo.");
+                    "message", "Project DONE. Loop complete — summarize the result for the user. "
+                            + "Generated code is committed under data/repo; see RUN.md for how to run it.");
+        }
+        if ("FAILED".equals(state) || "BLOCKED".equals(state)) {
+            // BLOCKED means work is stuck (e.g. a build that couldn't be fixed left a task in review).
+            // Never report this as success — tell the user plainly what is unresolved.
+            return Map.of("status", state, "nextAction", "STOP",
+                    "message", "Project " + state + " — it is NOT successfully done. Likely a build/test "
+                            + "failure that could not be fixed, or a blocked task. Inspect data/repo and "
+                            + "the failing tests, report the blocker to the user, and do not present this "
+                            + "as a finished product.");
         }
         // Not finished but nothing ready this instant (a task is running): tell the client to retry.
         return Map.of("status", state, "nextAction", "CALL_NEXT",

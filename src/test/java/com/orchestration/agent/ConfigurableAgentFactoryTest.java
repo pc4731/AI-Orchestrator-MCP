@@ -33,7 +33,11 @@ class ConfigurableAgentFactoryTest {
                 "qa-engineer", AgentDefinition.of("QA_ENGINEER", "sonnet", null,
                         List.of("RUN_TESTS", "EXECUTE_TOOLS"), 4096, 0.2),
                 "backend-architect", AgentDefinition.of("BACKEND_ARCHITECT", "opus", null,
-                        List.of("DESIGN_ARCHITECTURE"), 8192, 0.2)));
+                        List.of("DESIGN_ARCHITECTURE"), 8192, 0.2),
+                "ai-ml-architect", AgentDefinition.of("AI_ML_ARCHITECT", "opus", null,
+                        List.of("DESIGN_ARCHITECTURE"), 8192, 0.2),
+                "ai-ml-developer", AgentDefinition.of("AI_ML_DEVELOPER", "sonnet", null,
+                        List.of("WRITE_CODE", "EXECUTE_TOOLS"), 8192, 0.1)));
         LlmProperties llm = new LlmProperties(
                 new LlmProperties.Api("http://x", "2023-06-01", "key", 30),
                 new LlmProperties.Retry(3, 1, 5, 2.0),
@@ -50,6 +54,8 @@ class ConfigurableAgentFactoryTest {
         assertInstanceOf(DeveloperAgent.class, factory.create(AgentRole.BACKEND_DEVELOPER));
         assertInstanceOf(QaEngineerAgent.class, factory.create(AgentRole.QA_ENGINEER));
         assertInstanceOf(GenericLlmAgent.class, factory.create(AgentRole.BACKEND_ARCHITECT));
+        assertInstanceOf(GenericLlmAgent.class, factory.create(AgentRole.AI_ML_ARCHITECT));
+        assertInstanceOf(DeveloperAgent.class, factory.create(AgentRole.AI_ML_DEVELOPER));
     }
 
     @Test

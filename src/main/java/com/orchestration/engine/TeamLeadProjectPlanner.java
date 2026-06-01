@@ -54,11 +54,19 @@ public class TeamLeadProjectPlanner implements ProjectPlanner {
         // 1) Business Analyst elicits/clarifies requirements into a specification.
         String specification = elicitSpecification(projectId, request);
 
-        // 2) Team Lead decomposes the (clarified) request + spec into a role-assigned task graph.
+        // 2) Market Researcher studies comparable tools, their complaints, and recommends features.
+        String marketResearch = researchMarket(projectId, request, specification);
+
+        // 3) Team Lead decomposes the (clarified) request + spec + research into a task graph.
         Agent teamLead = agentFactory.create(AgentRole.TEAM_LEAD);
         Task planningTask = newTask(TaskId.random(), "Plan project", request.featureRequest(), AgentRole.TEAM_LEAD);
-        Map<String, String> grounding = specification.isBlank()
-                ? Map.of() : Map.of("specification", specification);
+        Map<String, String> grounding = new HashMap<>();
+        if (!specification.isBlank()) {
+            grounding.put("specification", specification);
+        }
+        if (!marketResearch.isBlank()) {
+            grounding.put("marketResearch", marketResearch);
+        }
 
         planAudit(projectId, AgentRole.TEAM_LEAD.name(), AuditLog.EventType.PROMPT,
                 "TEAM_LEAD decomposing the request into tasks",
@@ -138,6 +146,61 @@ public class TeamLeadProjectPlanner implements ProjectPlanner {
             return specText;
         } catch (RuntimeException e) {
             return ""; // never let requirements-gathering crash planning
+        }
+    }
+
+    /**
+     * Run the Market Researcher to study comparable tools, surface their common complaints, and
+     * recommend differentiating features plus a plan to address them. Best-effort: if the role isn't
+     * configured or it returns nothing, planning proceeds without it.
+     */
+    private String researchMarket(String projectId, OrchestrationEngine.ProjectRequest request,
+                                  String specification) {
+        if (!agentFactory.supports(AgentRole.MARKET_RESEARCHER)) {
+            return "";
+        }
+        try {
+            Agent researcher = agentFactory.create(AgentRole.MARKET_RESEARCHER);
+            Task task = newTask(TaskId.random(), "Research the market",
+                    request.featureRequest(), AgentRole.MARKET_RESEARCHER);
+            Map<String, String> grounding = specification.isBlank()
+                    ? Map.of() : Map.of("specification", specification);
+            planAudit(projectId, AgentRole.MARKET_RESEARCHER.name(), AuditLog.EventType.PROMPT,
+                    "MARKET_RESEARCHER researching comparable tools and their complaints",
+                    Map.of("role", "MARKET_RESEARCHER", "collaborator", "BUSINESS_ANALYST",
+                            "prompt", request.featureRequest()));
+            Agent.Response r = researcher.handle(
+                    new Agent.Request(task, request.featureRequest(), grounding, Map.of()),
+                    new Agent.Context(projectId, task.id().value(), Map.of()));
+            String research = summarizeResearch(r.structuredOutput());
+            planAudit(projectId, AgentRole.MARKET_RESEARCHER.name(), AuditLog.EventType.RESPONSE,
+                    "MARKET_RESEARCHER produced feature recommendations + a plan",
+                    Map.of("role", "MARKET_RESEARCHER", "detail",
+                            research.isBlank() ? "(no findings)" : trim(research)));
+            return research;
+        } catch (RuntimeException e) {
+            return ""; // never let market research crash planning
+        }
+    }
+
+    /** Fold the researcher's structured output into a compact text block the Team Lead can act on. */
+    private static String summarizeResearch(Map<String, Object> output) {
+        if (output == null || output.isEmpty()) {
+            return "";
+        }
+        StringBuilder sb = new StringBuilder();
+        appendIfPresent(sb, output, "summary", "Summary");
+        appendIfPresent(sb, output, "complaints", "Common complaints in similar tools");
+        appendIfPresent(sb, output, "recommendedFeatures", "Recommended features");
+        appendIfPresent(sb, output, "plan", "Plan to address them");
+        return sb.toString().strip();
+    }
+
+    private static void appendIfPresent(StringBuilder sb, Map<String, Object> output,
+                                        String key, String label) {
+        Object value = output.get(key);
+        if (value != null && !value.toString().isBlank()) {
+            sb.append(label).append(": ").append(value).append('\n');
         }
     }
 

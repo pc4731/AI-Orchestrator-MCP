@@ -166,7 +166,12 @@ public class DefaultOrchestrationEngine implements OrchestrationEngine {
                 Set<Task> ready = exec.graph.readyTasks();
                 if (ready.isEmpty()) {
                     if (exec.graph.isComplete()) {
-                        finish(exec, WorkflowState.DONE);
+                        // isComplete() is true when every task is terminal — but FAILED is terminal
+                        // too. A project is only DONE when no task failed; otherwise it FAILED, so a
+                        // broken build can never be reported as a successful project.
+                        boolean anyFailed = exec.graph.tasks().stream()
+                                .anyMatch(t -> t.state() == WorkflowState.FAILED);
+                        finish(exec, anyFailed ? WorkflowState.FAILED : WorkflowState.DONE);
                     } else if (exec.hasPendingGates()) {
                         exec.state = WorkflowState.NEEDS_CLARIFICATION;
                     } else {
