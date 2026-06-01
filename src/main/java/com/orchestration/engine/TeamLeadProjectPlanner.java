@@ -3,6 +3,7 @@ package com.orchestration.engine;
 import com.orchestration.agent.Agent;
 import com.orchestration.agent.AgentFactory;
 import com.orchestration.agent.AgentRole;
+import com.orchestration.audit.AuditLog;
 import com.orchestration.task.InMemoryTaskGraph;
 import com.orchestration.task.Task;
 import com.orchestration.task.TaskGraph;
@@ -15,6 +16,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.UUID;
 
 /**
  * The real {@link ProjectPlanner}: asks the Team Lead agent to decompose the feature request and
@@ -27,9 +29,24 @@ import java.util.Objects;
 public class TeamLeadProjectPlanner implements ProjectPlanner {
 
     private final AgentFactory agentFactory;
+    private final AuditLog auditLog; // optional; when present, planning steps stream to the UI
 
     public TeamLeadProjectPlanner(AgentFactory agentFactory) {
+        this(agentFactory, null);
+    }
+
+    public TeamLeadProjectPlanner(AgentFactory agentFactory, AuditLog auditLog) {
         this.agentFactory = Objects.requireNonNull(agentFactory, "agentFactory");
+        this.auditLog = auditLog;
+    }
+
+    private void planAudit(String projectId, String actor, AuditLog.EventType type,
+                           String summary, Map<String, Object> details) {
+        if (auditLog == null) {
+            return;
+        }
+        auditLog.record(new AuditLog.AuditEvent(UUID.randomUUID().toString(), projectId, null,
+                actor, type, summary, details, Instant.now()));
     }
 
     @Override
@@ -42,6 +59,11 @@ public class TeamLeadProjectPlanner implements ProjectPlanner {
         Task planningTask = newTask(TaskId.random(), "Plan project", request.featureRequest(), AgentRole.TEAM_LEAD);
         Map<String, String> grounding = specification.isBlank()
                 ? Map.of() : Map.of("specification", specification);
+
+        planAudit(projectId, AgentRole.TEAM_LEAD.name(), AuditLog.EventType.PROMPT,
+                "TEAM_LEAD decomposing the request into tasks",
+                Map.of("role", "TEAM_LEAD", "collaborator", "BUSINESS_ANALYST",
+                        "prompt", request.featureRequest()));
 
         Agent.Response response = teamLead.handle(
                 new Agent.Request(planningTask, request.featureRequest(), grounding, Map.of()),
@@ -100,11 +122,20 @@ public class TeamLeadProjectPlanner implements ProjectPlanner {
             Agent ba = agentFactory.create(AgentRole.BUSINESS_ANALYST);
             Task baTask = newTask(TaskId.random(), "Clarify requirements",
                     request.featureRequest(), AgentRole.BUSINESS_ANALYST);
+            planAudit(projectId, AgentRole.BUSINESS_ANALYST.name(), AuditLog.EventType.PROMPT,
+                    "BUSINESS_ANALYST eliciting requirements",
+                    Map.of("role", "BUSINESS_ANALYST", "collaborator", "user",
+                            "prompt", request.featureRequest()));
             Agent.Response r = ba.handle(
                     new Agent.Request(baTask, request.featureRequest(), Map.of(), Map.of()),
                     new Agent.Context(projectId, baTask.id().value(), Map.of()));
             Object spec = r.structuredOutput().get("specification");
-            return spec != null ? spec.toString() : "";
+            String specText = spec != null ? spec.toString() : "";
+            planAudit(projectId, AgentRole.BUSINESS_ANALYST.name(), AuditLog.EventType.RESPONSE,
+                    "BUSINESS_ANALYST produced a specification",
+                    Map.of("role", "BUSINESS_ANALYST", "detail",
+                            specText.isBlank() ? "(needs clarification)" : trim(specText)));
+            return specText;
         } catch (RuntimeException e) {
             return ""; // never let requirements-gathering crash planning
         }
@@ -152,5 +183,10 @@ public class TeamLeadProjectPlanner implements ProjectPlanner {
 
     private static List<?> asList(Object value) {
         return value instanceof List<?> list ? list : List.of();
+    }
+
+    private static String trim(String text) {
+        String t = text.strip();
+        return t.length() <= 280 ? t : t.substring(0, 280) + "…";
     }
 }

@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1"/>
 <title>AI Agent Orchestration — Live</title>
 <style>
-  :root { --bg:#0f1320; --panel:#171c2e; --line:#2a3350; --txt:#e6e9f2; --muted:#9aa3bd; }
+  :root { --bg:#0f1320; --panel:#171c2e; --line:#2a3350; --txt:#e6e9f2; --muted:#9aa3bd; --accent:#3b6cf6; }
   * { box-sizing: border-box; }
   body { margin:0; font:14px/1.5 system-ui,Segoe UI,Roboto,sans-serif; background:var(--bg); color:var(--txt); }
   header { padding:16px 22px; border-bottom:1px solid var(--line); }
@@ -13,15 +13,26 @@
   header p { margin:4px 0 0; color:var(--muted); font-size:12px; }
   .bar { display:flex; gap:8px; padding:14px 22px; border-bottom:1px solid var(--line); }
   .bar input { flex:1; padding:9px 12px; border-radius:8px; border:1px solid var(--line); background:#0c1020; color:var(--txt); }
-  .bar button { padding:9px 16px; border:0; border-radius:8px; background:#3b6cf6; color:#fff; font-weight:600; cursor:pointer; }
+  .bar button { padding:9px 16px; border:0; border-radius:8px; background:var(--accent); color:#fff; font-weight:600; cursor:pointer; }
   .bar button:disabled { opacity:.5; cursor:default; }
   .status { padding:10px 22px; color:var(--muted); border-bottom:1px solid var(--line); font-size:13px; }
   .status b { color:var(--txt); }
-  .grid { display:grid; grid-template-columns: 1fr 1fr; gap:0; height: calc(100vh - 190px); }
+
+  /* Active-agent banner: who is working right now and with whom */
+  .active { padding:14px 22px; border-bottom:1px solid var(--line); background:#141a30; display:flex; align-items:center; gap:14px; min-height:64px; flex-wrap:wrap; }
+  .active.idle { color:var(--muted); }
+  .pill { display:inline-flex; align-items:center; gap:8px; padding:6px 12px; border-radius:24px; background:#1c2444; border:1px solid var(--line); font-weight:600; }
+  .dot { width:9px; height:9px; border-radius:50%; background:#e0a800; box-shadow:0 0 0 0 rgba(224,168,0,.6); animation:pulse 1.4s infinite; }
+  @keyframes pulse { 0%{box-shadow:0 0 0 0 rgba(224,168,0,.55)} 70%{box-shadow:0 0 0 10px rgba(224,168,0,0)} 100%{box-shadow:0 0 0 0 rgba(224,168,0,0)} }
+  .arrow { color:var(--muted); }
+  .active .what { color:var(--muted); font-size:12.5px; }
+
+  .grid { display:grid; grid-template-columns: 1fr 1.2fr; gap:0; height: calc(100vh - 250px); }
   .col { padding:16px 22px; overflow:auto; }
   .col + .col { border-left:1px solid var(--line); }
   h2 { font-size:12px; text-transform:uppercase; letter-spacing:.08em; color:var(--muted); margin:0 0 12px; }
   .task { background:var(--panel); border:1px solid var(--line); border-left:4px solid var(--muted); border-radius:8px; padding:10px 12px; margin-bottom:10px; }
+  .task.activeTask { box-shadow:0 0 0 2px var(--accent) inset; }
   .task .t { font-weight:600; }
   .task .r { color:var(--muted); font-size:12px; }
   .task .dep { color:var(--muted); font-size:11px; margin-top:4px; }
@@ -32,20 +43,26 @@
   .NEEDS_CLARIFICATION { border-left-color:#8b5cf6; } .NEEDS_CLARIFICATION .badge { background:#3d2a70; }
   .DONE { border-left-color:#22c55e; } .DONE .badge { background:#0c4a2b; color:#86efac; }
   .FAILED { border-left-color:#ef4444; } .FAILED .badge { background:#5b1717; color:#fca5a5; }
-  .feed { font-family:ui-monospace,Menlo,monospace; font-size:12.5px; }
-  .ev { padding:6px 8px; border-bottom:1px solid #1f2740; display:flex; gap:8px; }
-  .ev .tag { flex:0 0 88px; font-weight:700; }
-  .ev .who { flex:0 0 130px; color:var(--muted); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+
+  .ev { padding:8px 10px; border-bottom:1px solid #1f2740; }
+  .ev .head { display:flex; gap:8px; align-items:center; cursor:pointer; }
+  .ev .tag { flex:0 0 78px; font-weight:700; font-size:11px; font-family:ui-monospace,Menlo,monospace; }
+  .ev .who { font-weight:600; }
+  .ev .with { color:var(--muted); font-size:12px; }
+  .ev .sum { color:var(--muted); font-size:12px; margin-left:auto; }
+  .ev .body { margin-top:6px; font-family:ui-monospace,Menlo,monospace; font-size:12px; color:#cfd6ee; background:#0c1020; border:1px solid var(--line); border-radius:6px; padding:8px; white-space:pre-wrap; display:none; }
+  .ev.open .body { display:block; }
   .PROMPT .tag { color:#7aa2ff; } .RESPONSE .tag { color:#7ee0a8; }
   .STATE_CHANGE .tag { color:#9aa3bd; } .ESCALATION .tag, .GATE .tag { color:#ffc266; }
   .ERROR .tag { color:#fca5a5; }
   .empty { color:var(--muted); font-style:italic; }
+  .hint { color:var(--muted); font-size:11px; margin-bottom:8px; }
 </style>
 </head>
 <body>
   <header>
     <h1>AI Agent Orchestration — live view</h1>
-    <p id="subtitle">Submit a feature request and watch the Team Lead decompose it and the agents collaborate.</p>
+    <p id="subtitle">Submit a feature request and watch the agents collaborate.</p>
   </header>
 
   <div class="bar" id="bar">
@@ -55,66 +72,61 @@
 
   <div class="status" id="status">No project running.</div>
 
+  <div class="active idle" id="active">Idle — no agent working yet.</div>
+
   <div class="grid">
     <div class="col">
       <h2>Task graph (live state)</h2>
       <div id="tasks"><div class="empty">Submit a request to see the task graph.</div></div>
     </div>
     <div class="col">
-      <h2>Agent interaction stream</h2>
-      <div id="feed" class="feed"><div class="empty">Waiting for events…</div></div>
+      <h2>Agent collaboration &amp; shared prompts</h2>
+      <div class="hint">Click any row to expand the prompt / detail being shared.</div>
+      <div id="feed"><div class="empty">Waiting for events…</div></div>
     </div>
   </div>
 
 <script>
 const $ = (id) => document.getElementById(id);
-let evtSource = null, poll = null, currentId = null;
-let mode = 'interactive';
+let evtSource = null, poll = null, currentId = null, mode = 'interactive';
+let activeRole = null, lastActiveAt = 0;
 
-// Decide mode on load: "observer" = driven by Claude Code via MCP (watch only);
-// "interactive" = this page submits requests itself.
 async function init() {
-  try {
-    const info = await fetch('/api/info').then(r => r.json());
-    mode = info.mode || 'interactive';
-  } catch (e) { mode = 'interactive'; }
+  try { mode = (await fetch('/api/info').then(r => r.json())).mode || 'interactive'; }
+  catch (e) { mode = 'interactive'; }
 
   if (mode === 'observer') {
     $('bar').style.display = 'none';
     $('subtitle').textContent =
-      'Observer mode — projects are driven by Claude Code via MCP. This dashboard follows the live run.';
+      'Observer mode — Claude Code drives the agents via MCP. This dashboard follows the live run.';
     $('tasks').innerHTML = '<div class="empty">Waiting for Claude Code to start a project…</div>';
     $('status').textContent = 'Waiting for an MCP-driven project…';
-    setInterval(pollActive, 1500);
+    setInterval(pollActive, 1200);
     pollActive();
   } else {
     $('go').addEventListener('click', submit);
     $('req').addEventListener('keydown', e => { if (e.key === 'Enter') submit(); });
   }
+  // Fade the active banner back to idle if nothing happens for a while.
+  setInterval(() => { if (activeRole && Date.now() - lastActiveAt > 8000) setIdle(); }, 2000);
 }
 
-// Observer mode: ask the server which project to follow; attach when one appears or changes.
 async function pollActive() {
   try {
     const { projectId } = await fetch('/api/active').then(r => r.json());
-    if (projectId && projectId !== currentId) {
-      attach(projectId);
-    }
-  } catch (e) { /* server not ready yet */ }
+    if (projectId && projectId !== currentId) attach(projectId);
+  } catch (e) {}
 }
 
-// Begin following a project: open its event stream and poll its status/graph.
 function attach(projectId) {
   currentId = projectId;
   $('feed').innerHTML = '';
   $('tasks').innerHTML = '<div class="empty">Loading…</div>';
   if (evtSource) evtSource.close();
   if (poll) clearInterval(poll);
-
   evtSource = new EventSource('/api/stream?projectId=' + projectId);
   evtSource.addEventListener('audit', (e) => addEvent(JSON.parse(e.data)));
-
-  poll = setInterval(() => refresh(projectId), 500);
+  poll = setInterval(() => refresh(projectId), 400);   // faster so it reflects during the loop
   refresh(projectId);
 }
 
@@ -122,28 +134,28 @@ async function submit() {
   const featureRequest = $('req').value.trim();
   if (!featureRequest) return;
   $('go').disabled = true;
-
   const res = await fetch('/api/projects', {
     method: 'POST', headers: {'Content-Type': 'application/json'},
     body: JSON.stringify({ featureRequest })
   });
-  const { projectId } = await res.json();
-  attach(projectId);
+  attach((await res.json()).projectId);
 }
 
 async function refresh(id) {
-  const [status, graph] = await Promise.all([
-    fetch('/api/projects/' + id).then(r => r.json()),
-    fetch('/api/projects/' + id + '/graph').then(r => r.json())
-  ]);
-  renderStatus(status);
-  renderTasks(graph.nodes || []);
-  const terminal = ['DONE','FAILED'].includes(status.state);
-  if (terminal) {
-    clearInterval(poll); poll = null;
-    setTimeout(() => { if (evtSource) evtSource.close(); }, 1500);
-    if (mode === 'interactive') $('go').disabled = false;
-  }
+  try {
+    const [status, graph] = await Promise.all([
+      fetch('/api/projects/' + id).then(r => r.json()),
+      fetch('/api/projects/' + id + '/graph').then(r => r.json())
+    ]);
+    renderStatus(status);
+    renderTasks(graph.nodes || []);
+    if (['DONE','FAILED'].includes(status.state)) {
+      clearInterval(poll); poll = null;
+      setIdle('Project ' + status.state + '.');
+      setTimeout(() => { if (evtSource) evtSource.close(); }, 1500);
+      if (mode === 'interactive') $('go').disabled = false;
+    }
+  } catch (e) {}
 }
 
 function renderStatus(s) {
@@ -157,22 +169,53 @@ function renderTasks(nodes) {
   const byId = {}; nodes.forEach(n => byId[n.id] = n);
   $('tasks').innerHTML = nodes.map(n => {
     const deps = (n.dependsOn || []).map(d => byId[d] ? byId[d].title : d);
-    return `<div class="task ${n.state}">
+    const isActive = n.state === 'IN_PROGRESS';
+    return `<div class="task ${n.state} ${isActive ? 'activeTask' : ''}">
       <span class="badge">${n.state}</span>
       <div class="t">${esc(n.title)}</div>
-      <div class="r">▸ ${n.role || 'unassigned'}</div>
+      <div class="r">▸ ${esc(n.role || 'unassigned')}</div>
       ${deps.length ? `<div class="dep">depends on: ${deps.map(esc).join(', ')}</div>` : ''}
     </div>`;
   }).join('');
 }
 
+// The active-agent banner: who is working, and who they are collaborating with.
+function setActive(role, collaborator, what) {
+  activeRole = role; lastActiveAt = Date.now();
+  const withHtml = collaborator
+    ? `<span class="arrow">↔</span><span class="pill">${esc(collaborator)}</span>` : '';
+  $('active').className = 'active';
+  $('active').innerHTML =
+    `<span class="dot"></span><span class="pill">${esc(role)}</span>${withHtml}` +
+    (what ? `<span class="what">${esc(what)}</span>` : '');
+}
+function setIdle(msg) {
+  activeRole = null;
+  $('active').className = 'active idle';
+  $('active').textContent = msg || 'Idle — no agent working yet.';
+}
+
 function addEvent(ev) {
   const feed = $('feed');
   if (feed.querySelector('.empty')) feed.innerHTML = '';
-  const who = ev.actor === 'engine' ? 'engine' : (ev.actor || '').slice(0,8);
+  const role = ev.role || (ev.actor === 'engine' ? 'engine' : (ev.actor || '').slice(0,8));
+
+  // A PROMPT event means this agent just started working (optionally with a collaborator).
+  if (ev.type === 'PROMPT' && ev.role) setActive(ev.role, ev.collaborator, ev.summary);
+
   const row = document.createElement('div');
   row.className = 'ev ' + ev.type;
-  row.innerHTML = `<span class="tag">${ev.type}</span><span class="who">${esc(who)}</span><span>${esc(ev.summary)}</span>`;
+  const withTxt = ev.collaborator ? ` ↔ ${esc(ev.collaborator)}` : '';
+  const body = ev.prompt || ev.detail || '';
+  row.innerHTML =
+    `<div class="head">
+       <span class="tag">${esc(ev.type)}</span>
+       <span class="who">${esc(role)}</span>
+       <span class="with">${withTxt}</span>
+       <span class="sum">${esc(ev.summary || '')}</span>
+     </div>` +
+    (body ? `<div class="body">${esc(body)}</div>` : '');
+  if (body) row.querySelector('.head').addEventListener('click', () => row.classList.toggle('open'));
   feed.appendChild(row);
   feed.scrollTop = feed.scrollHeight;
 }

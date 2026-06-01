@@ -117,12 +117,18 @@ public class ProjectController {
                 return;
             }
             try {
+                Map<String, Object> d = event.details();
                 emitter.send(SseEmitter.event().name("audit").data(Map.of(
                         "projectId", String.valueOf(event.projectId()),
                         "taskId", String.valueOf(event.taskId()),
                         "actor", event.actor(),
                         "type", event.type().name(),
                         "summary", event.summary(),
+                        // Enriched fields for the live view (empty string when absent).
+                        "role", String.valueOf(d.getOrDefault("role", "")),
+                        "collaborator", String.valueOf(d.getOrDefault("collaborator", "")),
+                        "prompt", String.valueOf(d.getOrDefault("prompt", "")),
+                        "detail", String.valueOf(d.getOrDefault("detail", "")),
                         "at", event.at().toString())));
             } catch (IOException | IllegalStateException e) {
                 emitter.completeWithError(e);

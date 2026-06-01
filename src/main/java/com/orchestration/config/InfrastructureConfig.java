@@ -112,8 +112,8 @@ public class InfrastructureConfig {
     }
 
     @Bean
-    public ProjectPlanner projectPlanner(AgentFactory agentFactory) {
-        return new TeamLeadProjectPlanner(agentFactory);
+    public ProjectPlanner projectPlanner(AgentFactory agentFactory, AuditLog auditLog) {
+        return new TeamLeadProjectPlanner(agentFactory, auditLog);
     }
 
     @Bean

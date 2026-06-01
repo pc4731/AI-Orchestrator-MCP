@@ -91,8 +91,15 @@ public class AgentTaskProcessor implements TaskProcessor {
                     + (attempt > 0 ? "\n\nThis is rework attempt " + attempt
                         + ". Address the reviewFeedback and meet the acceptance criteria." : "");
 
+            // What prompt is this agent being given? (refined prompt if any, else the instructions.)
+            String sharedPrompt = !refinedPrompt.isBlank() ? refinedPrompt : instructions;
+            String collaborator = attempt > 0 ? "reviewer (rework)"
+                    : (!refinedPrompt.isBlank() ? "PROMPT_ENGINEER" : "TEAM_LEAD");
             audit(projectId, task, agent, AuditLog.EventType.PROMPT,
-                    (attempt == 0 ? "Dispatching to " : "Rework #" + attempt + " for ") + agent.role());
+                    (attempt == 0 ? "Dispatching to " : "Rework #" + attempt + " for ") + agent.role(),
+                    Map.of("role", agent.role().name(),
+                            "collaborator", collaborator,
+                            "prompt", sharedPrompt));
 
             Agent.Request request = new Agent.Request(task, instructions, grounding, baseParams);
             Agent.Context context = new Agent.Context(projectId, task.id().value(), Map.of());
@@ -102,7 +109,11 @@ public class AgentTaskProcessor implements TaskProcessor {
             audit(projectId, task, agent, AuditLog.EventType.RESPONSE,
                     "outcome=" + response.outcome() + ", confidence=" + response.confidence()
                             + ", artifacts=" + response.artifacts().size()
-                            + (attempt > 0 ? " (rework #" + attempt + ")" : ""));
+                            + (attempt > 0 ? " (rework #" + attempt + ")" : ""),
+                    Map.of("role", agent.role().name(),
+                            "outcome", response.outcome().name(),
+                            "detail", response.escalationReason().orElse(
+                                    summarize(response.structuredOutput()))));
 
             if (response.outcome() != Agent.Outcome.NEEDS_REVIEW || attempt == maxReworkAttempts) {
                 break;
@@ -123,10 +134,22 @@ public class AgentTaskProcessor implements TaskProcessor {
             Agent pe = agentFactory.create(AgentRole.PROMPT_ENGINEER);
             String ask = "Target role: " + task.assignedRole() + "\nTask: " + task.title()
                     + "\nDetails: " + task.description();
+            auditLog.record(new AuditLog.AuditEvent(
+                    UUID.randomUUID().toString(), projectId, task.id().value(), pe.id().value(),
+                    AuditLog.EventType.PROMPT, "PROMPT_ENGINEER refining prompt for " + task.assignedRole(),
+                    Map.of("role", "PROMPT_ENGINEER", "collaborator", task.assignedRole().name(),
+                            "prompt", ask), Instant.now()));
             Agent.Request request = new Agent.Request(task, ask, Map.of(), Map.of());
             Agent.Response r = pe.handle(request, new Agent.Context(projectId, task.id().value(), Map.of()));
             Object refined = r.structuredOutput().get("refinedPrompt");
-            return refined != null ? refined.toString() : "";
+            String refinedText = refined != null ? refined.toString() : "";
+            auditLog.record(new AuditLog.AuditEvent(
+                    UUID.randomUUID().toString(), projectId, task.id().value(), pe.id().value(),
+                    AuditLog.EventType.RESPONSE, "PROMPT_ENGINEER produced a refined prompt",
+                    Map.of("role", "PROMPT_ENGINEER", "detail",
+                            refinedText.isBlank() ? "(no refinement)" : summarizeText(refinedText)),
+                    Instant.now()));
+            return refinedText;
         } catch (RuntimeException e) {
             return "";
         }
@@ -153,8 +176,30 @@ public class AgentTaskProcessor implements TaskProcessor {
     }
 
     private void audit(String projectId, Task task, Agent agent, AuditLog.EventType type, String summary) {
+        audit(projectId, task, agent, type, summary, Map.of());
+    }
+
+    private void audit(String projectId, Task task, Agent agent, AuditLog.EventType type,
+                       String summary, Map<String, Object> details) {
         auditLog.record(new AuditLog.AuditEvent(
                 UUID.randomUUID().toString(), projectId, task.id().value(),
-                agent.id().value(), type, summary, Map.of(), Instant.now()));
+                agent.id().value(), type, summary, details, Instant.now()));
+    }
+
+    private static String summarize(Map<String, Object> output) {
+        if (output == null || output.isEmpty()) {
+            return "";
+        }
+        Object summary = output.getOrDefault("summary", output.getOrDefault("specification", ""));
+        return summarizeText(summary.toString());
+    }
+
+    private static String summarizeText(String text) {
+        if (text == null) {
+            return "";
+        }
+        String trimmed = text.strip();
+        return trimmed.length() <= 280 ? trimmed : trimmed.substring(0, 280) + "…";
     }
 }
+
