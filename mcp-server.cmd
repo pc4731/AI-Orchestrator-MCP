@@ -18,5 +18,13 @@ if exist "%DIR%dist\%JAR_NAME%" (
   set "JAR=%DIR%build\libs\%JAR_NAME%"
 )
 
+REM The mcp profile also serves a read-only dashboard. Override the port if 8090 is taken by
+REM setting AO_DASHBOARD_PORT before launching.
+if "%AO_DASHBOARD_PORT%"=="" set "AO_DASHBOARD_PORT=8090"
+
+REM Use JAVA_HOME's java if set, else PATH java (must be Java 21+; the jar targets Java 21).
+set "JAVA_BIN=java"
+if defined JAVA_HOME set "JAVA_BIN=%JAVA_HOME%\bin\java"
+
 REM stdout MUST stay clean for the MCP protocol; the app routes logs to stderr (logback-mcp.xml).
-java -jar "%JAR%" --spring.profiles.active=mcp
+"%JAVA_BIN%" -jar "%JAR%" --spring.profiles.active=mcp --server.port=%AO_DASHBOARD_PORT%

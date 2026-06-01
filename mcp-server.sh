@@ -43,5 +43,9 @@ if [[ -z "$JAVA_BIN" ]]; then
   fi
 fi
 
+# The mcp profile also serves a read-only dashboard. Override the port if 8090 is taken:
+#   AO_DASHBOARD_PORT=8095 ... (or set it before registering the server).
+PORT="${AO_DASHBOARD_PORT:-8090}"
+
 # stdout MUST stay clean for the MCP protocol; the app routes logs to stderr (logback-mcp.xml).
-exec "$JAVA_BIN" -jar "$JAR" --spring.profiles.active=mcp
+exec "$JAVA_BIN" -jar "$JAR" --spring.profiles.active=mcp --server.port="$PORT"

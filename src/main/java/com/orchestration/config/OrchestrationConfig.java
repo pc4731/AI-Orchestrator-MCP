@@ -1,5 +1,6 @@
 package com.orchestration.config;
 
+import com.orchestration.agent.SkillRegistry;
 import com.orchestration.llm.AnthropicClientConfig;
 import com.orchestration.llm.AnthropicLlmClient;
 import com.orchestration.llm.LlmClient;
@@ -9,6 +10,7 @@ import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.context.annotation.Profile;
 
+import java.nio.file.Path;
 import java.time.Duration;
 
 /**
@@ -26,7 +28,8 @@ import java.time.Duration;
         MemoryProperties.class,
         MessageBusProperties.class,
         SandboxProperties.class,
-        WorkspaceProperties.class
+        WorkspaceProperties.class,
+        SkillsProperties.class
 })
 public class OrchestrationConfig {
 
@@ -51,5 +54,10 @@ public class OrchestrationConfig {
     @Bean
     public SandboxSettings sandboxSettings(SandboxProperties properties) {
         return properties.toSettings();
+    }
+
+    @Bean
+    public SkillRegistry skillRegistry(SkillsProperties properties) {
+        return new SkillRegistry(Path.of(properties.dir()));
     }
 }
