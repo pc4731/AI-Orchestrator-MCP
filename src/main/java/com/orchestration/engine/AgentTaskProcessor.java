@@ -6,6 +6,7 @@ import com.orchestration.agent.AgentRole;
 import com.orchestration.artifact.ArtifactRepository;
 import com.orchestration.audit.AuditLog;
 import com.orchestration.task.Task;
+import com.orchestration.task.TaskId;
 
 import java.time.Instant;
 import java.util.LinkedHashMap;
@@ -13,6 +14,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * The real {@link TaskProcessor}: routes a task to the right agent (via {@link AgentFactory}), runs
@@ -28,6 +30,10 @@ import java.util.UUID;
  *       reviewer's feedback up to {@code maxReworkAttempts} times, so the team iterates toward a
  *       result that meets the criteria instead of accepting a weak first pass. Only the final
  *       outcome is returned to the engine.</li>
+ *   <li><b>Collaboration hand-offs</b> — when a task completes, its output is recorded on a shared
+ *       board keyed by task id. Before a downstream task runs, the outputs of its completed
+ *       dependencies (the architect's spec, the designer's tokens, …) are injected as grounding, so
+ *       agents genuinely build on each other's work instead of running in isolation.</li>
  * </ul>
  *
  * <p>It also injects {@code workingDir} (the Git-backed repo) and {@code testCommand} into every
@@ -35,12 +41,18 @@ import java.util.UUID;
  */
 public class AgentTaskProcessor implements TaskProcessor {
 
+    /** One agent's completed output, handed to downstream agents that depend on its task. */
+    private record Handoff(String role, String summary) {}
+
     private final AgentFactory agentFactory;
     private final ArtifactRepository artifactRepository;
     private final AuditLog auditLog;
     private final String workingDir;
     private final List<String> defaultTestCommand;
     private final int maxReworkAttempts;
+
+    // Completed task outputs, keyed by task id, shared across the project's tasks.
+    private final Map<String, Handoff> handoffs = new ConcurrentHashMap<>();
 
     /** Convenience for tests: working dir ".", Gradle test command, 2 rework attempts. */
     public AgentTaskProcessor(AgentFactory agentFactory,
@@ -75,12 +87,15 @@ public class AgentTaskProcessor implements TaskProcessor {
         baseParams.put("testCommand", defaultTestCommand);
         baseParams.putAll(task.metadata());
 
+        // Collaboration: gather the outputs of this task's completed dependencies as grounding.
+        Map<String, String> upstream = upstreamHandoffs(task);
+
         Agent.Response response = null;
         String reviewFeedback = null;
 
         // Initial run plus up to maxReworkAttempts re-runs while the work needs review.
         for (int attempt = 0; attempt <= maxReworkAttempts; attempt++) {
-            Map<String, String> grounding = new LinkedHashMap<>();
+            Map<String, String> grounding = new LinkedHashMap<>(upstream);
             if (!refinedPrompt.isBlank()) {
                 grounding.put("refinedPrompt", refinedPrompt);
             }
@@ -93,10 +108,15 @@ public class AgentTaskProcessor implements TaskProcessor {
 
             // What prompt is this agent being given? (refined prompt if any, else the instructions.)
             String sharedPrompt = !refinedPrompt.isBlank() ? refinedPrompt : instructions;
+            // Who is this agent building on? Upstream dependency roles, else the pre-step collaborator.
             String collaborator = attempt > 0 ? "reviewer (rework)"
-                    : (!refinedPrompt.isBlank() ? "PROMPT_ENGINEER" : "TEAM_LEAD");
-            audit(projectId, task, agent, AuditLog.EventType.PROMPT,
-                    (attempt == 0 ? "Dispatching to " : "Rework #" + attempt + " for ") + agent.role(),
+                    : upstream.isEmpty()
+                        ? (!refinedPrompt.isBlank() ? "PROMPT_ENGINEER" : "TEAM_LEAD")
+                        : String.join(", ", upstream.keySet()).replace("from_", "");
+            String summary = (attempt == 0 ? "Dispatching to " : "Rework #" + attempt + " for ")
+                    + agent.role()
+                    + (upstream.isEmpty() ? "" : " (building on " + collaborator + ")");
+            audit(projectId, task, agent, AuditLog.EventType.PROMPT, summary,
                     Map.of("role", agent.role().name(),
                             "collaborator", collaborator,
                             "prompt", sharedPrompt));
@@ -121,7 +141,41 @@ public class AgentTaskProcessor implements TaskProcessor {
             reviewFeedback = response.escalationReason()
                     .orElse("The previous result did not meet the acceptance criteria; improve it.");
         }
+
+        // Publish this task's output to the collaboration board for downstream agents.
+        recordHandoff(task, agent, response);
         return response;
+    }
+
+    /** Collect the outputs of this task's completed dependencies, keyed for prompt grounding. */
+    private Map<String, String> upstreamHandoffs(Task task) {
+        Map<String, String> upstream = new LinkedHashMap<>();
+        for (TaskId dep : task.dependsOn()) {
+            Handoff h = handoffs.get(dep.value());
+            if (h != null && !h.summary().isBlank()) {
+                // e.g. "from_BACKEND_ARCHITECT" -> the architect's spec/instructions.
+                upstream.put("from_" + h.role(), h.summary());
+            }
+        }
+        return upstream;
+    }
+
+    /** Record a task's output so dependents can build on it; audit the hand-off for the live view. */
+    private void recordHandoff(Task task, Agent agent, Agent.Response response) {
+        if (response == null) {
+            return;
+        }
+        String summary = response.escalationReason().isPresent()
+                ? "" : summarize(response.structuredOutput());
+        // Prefer concrete instructions/spec/tokens fields if the agent produced them.
+        for (String key : List.of("instructions", "specification", "tokens", "schema", "summary")) {
+            Object v = response.structuredOutput().get(key);
+            if (v != null && !v.toString().isBlank()) {
+                summary = summarizeText(v.toString());
+                break;
+            }
+        }
+        handoffs.put(task.id().value(), new Handoff(agent.role().name(), summary));
     }
 
     /** Run the Prompt Engineer to sharpen the prompt for worker roles; empty for non-worker roles
