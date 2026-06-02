@@ -3,6 +3,8 @@ package com.orchestration.engine;
 import com.orchestration.agent.Agent;
 import com.orchestration.agent.AgentRole;
 import com.orchestration.audit.AuditLog;
+import com.orchestration.budget.DefaultTokenBudgetManager;
+import com.orchestration.llm.TokenUsage;
 import com.orchestration.memory.MemoryStore;
 import com.orchestration.task.InMemoryTaskGraph;
 import com.orchestration.task.Task;
@@ -72,6 +74,30 @@ class DefaultOrchestrationEngineTest {
         assertEquals(2, status.totalTasks());
         assertEquals(2, status.completedTasks());
         assertTrue(memory.latestCheckpoint(handle.projectId()).isPresent());
+    }
+
+    @Test
+    void haltsAsBlockedWhenProjectBudgetIsExhaustedButNeverMidTask() throws Exception {
+        FakeMemoryStore memory = new FakeMemoryStore();
+        DefaultTokenBudgetManager budget = new DefaultTokenBudgetManager();
+        CopyOnWriteArrayList<String> processed = new CopyOnWriteArrayList<>();
+        TaskProcessor processor = (projectId, task) -> {
+            processed.add(task.id().value());
+            // Task "a" blows the 100-token ceiling DURING its (completed) work — it still finishes,
+            // proving a running task (and its rework loops) is never aborted mid-flight.
+            budget.record(projectId, task.id(), new TokenUsage(150, 0, 0, 0));
+            return response(Agent.Outcome.COMPLETED);
+        };
+        DefaultOrchestrationEngine engine = new DefaultOrchestrationEngine(
+                linearGraphPlanner(), processor, memory, new FakeAuditLog(), budget, 100L);
+
+        var handle = engine.submit(new OrchestrationEngine.ProjectRequest("build X", Map.of(), Optional.empty()));
+        WorkflowState settled = engine.awaitSettled(handle.projectId(), TIMEOUT);
+
+        assertEquals(WorkflowState.BLOCKED, settled);
+        assertEquals(List.of("a"), processed,
+                "the breaker fires BETWEEN tasks: 'a' completes, 'b' never starts");
+        assertTrue(engine.status(handle.projectId()).tokensUsed() >= 150, "usage is surfaced in status");
     }
 
     @Test

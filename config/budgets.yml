@@ -7,5 +7,8 @@ budgets:
   bug-loop:
     # Max QA -> Team Lead -> Developer round trips before escalating (prevents infinite loops).
     max-retries: 3
-  # What to do when a budget is breached: ESCALATE to the Team Lead, or HALT the project.
-  on-breach: ESCALATE
+  # On breach the engine halts cleanly BETWEEN tasks — a running task, including its rework/build-fix
+  # loops, always finishes first — and reports the project BLOCKED with the cost. This is a circuit
+  # breaker against runaway cost, NOT a per-call quality limit, so size project.max-tokens as a
+  # ceiling comfortably above a normal run.
+  on-breach: HALT

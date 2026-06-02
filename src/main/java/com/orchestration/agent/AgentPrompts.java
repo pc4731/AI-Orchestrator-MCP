@@ -67,9 +67,15 @@ public final class AgentPrompts {
                     + "copy — UI text, docs, and marketing content — in a consistent voice";
             case SEO_EXPERT -> "the SEO Expert; you optimise content and markup for search visibility "
                     + "(keywords, metadata, semantic structure) without harming UX or accessibility";
+            case DEVOPS_ENGINEER -> "the DevOps / Release Engineer; you make the project shippable — "
+                    + "containerisation, CI/CD, and reproducible build/run/deploy config — using only "
+                    + "the stack the team actually built";
             case KNOWLEDGE_CURATOR -> "the Knowledge Curator; you distil what the project does and how "
                     + "it works into a concise, structured brief so a future session has full context "
                     + "without re-reading the whole codebase";
+            case PROJECT_EXPLAINER -> "the Project Explainer; you read an unfamiliar, prebuilt codebase "
+                    + "and explain what it does and how it works — its purpose, architecture, stack, "
+                    + "entry points, and key flows — grounded strictly in the files you actually read";
         };
         return "You are " + responsibility + ". Be precise, ground your output in the given inputs, "
                 + "and never fabricate APIs, libraries, or facts.";

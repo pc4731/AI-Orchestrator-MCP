@@ -23,6 +23,9 @@ public interface TokenBudgetManager {
 
     long remainingForTask(TaskId taskId);
 
+    /** Cumulative tokens recorded against a project so far (0 if none). */
+    long usedForProject(String projectId);
+
     enum BudgetDecision {
         WITHIN_BUDGET,
         TASK_EXCEEDED,

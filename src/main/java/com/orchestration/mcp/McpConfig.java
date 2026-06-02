@@ -2,9 +2,12 @@ package com.orchestration.mcp;
 
 import com.orchestration.agent.AgentFactory;
 import com.orchestration.agent.SkillRegistry;
+import com.orchestration.budget.TokenBudgetManager;
 import com.orchestration.config.AgentsProperties;
+import com.orchestration.config.WorkspaceProperties;
 import com.orchestration.engine.ClarificationGateway;
 import com.orchestration.engine.OrchestrationEngine;
+import com.orchestration.knowledge.ProjectKnowledgeStore;
 import com.orchestration.memory.MemoryStore;
 import com.orchestration.web.ActiveProject;
 import org.springframework.boot.CommandLineRunner;
@@ -27,8 +30,9 @@ public class McpConfig {
     }
 
     @Bean
-    public AgentFactory agentFactory(AgentsProperties agents, McpBridge bridge, SkillRegistry skills) {
-        return new McpAgentFactory(agents, bridge, skills);
+    public AgentFactory agentFactory(AgentsProperties agents, McpBridge bridge, SkillRegistry skills,
+                                     TokenBudgetManager tokenBudgetManager) {
+        return new McpAgentFactory(agents, bridge, skills, tokenBudgetManager);
     }
 
     /**
@@ -45,8 +49,11 @@ public class McpConfig {
     public OrchestrationMcpService orchestrationMcpService(OrchestrationEngine engine,
                                                           McpBridge bridge,
                                                           MemoryStore memoryStore,
-                                                          ActiveProject activeProject) {
-        return new OrchestrationMcpService(engine, bridge, memoryStore, activeProject);
+                                                          ActiveProject activeProject,
+                                                          ProjectKnowledgeStore knowledgeStore,
+                                                          WorkspaceProperties workspace) {
+        return new OrchestrationMcpService(engine, bridge, memoryStore, activeProject,
+                knowledgeStore, workspace.repoDir());
     }
 
     @Bean

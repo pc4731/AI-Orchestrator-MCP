@@ -11,10 +11,12 @@ import com.orchestration.task.TaskId;
 import com.orchestration.task.WorkflowState;
 
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Optional;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 
@@ -53,6 +55,7 @@ public class AgentTaskProcessor implements TaskProcessor {
     private final List<String> defaultTestCommand;
     private final int maxReworkAttempts;
     private final ProjectKnowledgeStore knowledgeStore; // optional; null disables the project brain
+    private final ClarificationGateway clarifier; // optional; lets a blocked worker ask the user
 
     // Completed task outputs, keyed by task id, shared across the project's tasks.
     private final Map<String, Handoff> handoffs = new ConcurrentHashMap<>();
@@ -81,6 +84,18 @@ public class AgentTaskProcessor implements TaskProcessor {
                               List<String> defaultTestCommand,
                               int maxReworkAttempts,
                               ProjectKnowledgeStore knowledgeStore) {
+        this(agentFactory, artifactRepository, auditLog, workingDir, defaultTestCommand,
+                maxReworkAttempts, knowledgeStore, null);
+    }
+
+    public AgentTaskProcessor(AgentFactory agentFactory,
+                              ArtifactRepository artifactRepository,
+                              AuditLog auditLog,
+                              String workingDir,
+                              List<String> defaultTestCommand,
+                              int maxReworkAttempts,
+                              ProjectKnowledgeStore knowledgeStore,
+                              ClarificationGateway clarifier) {
         this.agentFactory = Objects.requireNonNull(agentFactory, "agentFactory");
         this.artifactRepository = Objects.requireNonNull(artifactRepository, "artifactRepository");
         this.auditLog = Objects.requireNonNull(auditLog, "auditLog");
@@ -88,6 +103,7 @@ public class AgentTaskProcessor implements TaskProcessor {
         this.defaultTestCommand = List.copyOf(defaultTestCommand);
         this.maxReworkAttempts = Math.max(0, maxReworkAttempts);
         this.knowledgeStore = knowledgeStore;
+        this.clarifier = clarifier;
     }
 
     @Override
@@ -105,17 +121,103 @@ public class AgentTaskProcessor implements TaskProcessor {
         // Collaboration: gather the outputs of this task's completed dependencies as grounding.
         Map<String, String> upstream = upstreamHandoffs(task);
 
-        // QA verification gets a build-fix loop (re-run a developer on failure) instead of the
-        // generic rework loop, since re-running QA on a red build would change nothing.
-        Agent.Response response = agent.role() == AgentRole.QA_ENGINEER
-                ? verifyWithBuildFix(projectId, task, agent, baseParams, upstream)
-                : runWithRework(projectId, task, agent, refinedPrompt, baseParams, upstream);
+        Agent.Response response = runTask(projectId, task, agent, refinedPrompt, baseParams, upstream);
+
+        // Execution-time clarification: if the agent is blocked for missing info and a gateway is
+        // available, ask the user and re-run with their answers — so a mid-build question is resolved
+        // instead of leaving the project stuck awaiting a gate that nothing resolves.
+        response = resolveIfBlocked(projectId, task, agent, refinedPrompt, baseParams, upstream, response);
 
         // Publish this task's output to the collaboration board for downstream agents.
         recordHandoff(task, agent, response);
         // The Knowledge Curator's brief is committed as the project knowledge file for future sessions.
         persistKnowledge(projectId, task, agent, response);
         return response;
+    }
+
+    /** Dispatch a task: QA gets the build-fix loop, every other role the generic rework loop. */
+    private Agent.Response runTask(String projectId, Task task, Agent agent, String refinedPrompt,
+                                   Map<String, Object> baseParams, Map<String, String> upstream) {
+        // QA verification gets a build-fix loop (re-run a developer on failure) instead of the
+        // generic rework loop, since re-running QA on a red build would change nothing.
+        return agent.role() == AgentRole.QA_ENGINEER
+                ? verifyWithBuildFix(projectId, task, agent, baseParams, upstream)
+                : runWithRework(projectId, task, agent, refinedPrompt, baseParams, upstream);
+    }
+
+    /**
+     * When an agent reports it lacks information (INSUFFICIENT_INFORMATION / ESCALATE) and a
+     * {@link ClarificationGateway} is wired, relay its questions to the user and re-run the task with
+     * the answers as grounding, up to {@code maxReworkAttempts} times. Without a gateway, or if the
+     * user can't answer, the original blocked response is returned unchanged.
+     */
+    private Agent.Response resolveIfBlocked(String projectId, Task task, Agent agent,
+                                            String refinedPrompt, Map<String, Object> baseParams,
+                                            Map<String, String> upstream, Agent.Response response) {
+        if (clarifier == null) {
+            return response;
+        }
+        Map<String, String> augmented = new LinkedHashMap<>(upstream);
+        StringBuilder answered = new StringBuilder();
+        for (int round = 1; round <= maxReworkAttempts && isBlocked(response); round++) {
+            List<String> questions = blockingQuestions(response);
+            if (questions.isEmpty()) {
+                break;
+            }
+            Optional<String> answers = safeAsk(projectId, questions, task);
+            if (answers.isEmpty()) {
+                break; // no human available / declined: leave the task blocked
+            }
+            answered.append("Q: ").append(String.join(" | ", questions))
+                    .append("\nA: ").append(answers.get()).append("\n\n");
+            augmented.put("userClarification", answered.toString().strip());
+            audit(projectId, task, agent, AuditLog.EventType.PROMPT,
+                    "Clarified with the user; re-running " + agent.role(),
+                    Map.of("role", agent.role().name(), "collaborator", "user",
+                            "prompt", String.join(" | ", questions)));
+            response = runTask(projectId, task, agent, refinedPrompt, baseParams, augmented);
+        }
+        return response;
+    }
+
+    private static boolean isBlocked(Agent.Response r) {
+        return r.outcome() == Agent.Outcome.INSUFFICIENT_INFORMATION
+                || r.outcome() == Agent.Outcome.ESCALATE;
+    }
+
+    /** The questions a blocked agent wants answered (output.questions, else its escalationReason). */
+    private List<String> blockingQuestions(Agent.Response r) {
+        List<String> out = new ArrayList<>();
+        Object q = r.structuredOutput().get("questions");
+        if (q instanceof List<?> list) {
+            for (Object item : list) {
+                if (item instanceof Map<?, ?> m) {
+                    Object t = m.get("question");
+                    if (t == null) {
+                        t = m.values().stream().findFirst().orElse(null);
+                    }
+                    if (t != null && !t.toString().isBlank()) {
+                        out.add(t.toString());
+                    }
+                } else if (item != null && !item.toString().isBlank()) {
+                    out.add(item.toString());
+                }
+            }
+        } else if (q != null && !q.toString().isBlank()) {
+            out.add(q.toString());
+        }
+        if (out.isEmpty()) {
+            r.escalationReason().ifPresent(out::add);
+        }
+        return out;
+    }
+
+    private Optional<String> safeAsk(String projectId, List<String> questions, Task task) {
+        try {
+            return clarifier.ask(projectId, questions, task.title() + ": " + task.description());
+        } catch (RuntimeException e) {
+            return Optional.empty(); // never let a clarification round crash the task
+        }
     }
 
     /** Initial run plus up to {@code maxReworkAttempts} re-runs of the same agent while it needs
@@ -350,9 +452,9 @@ public class AgentTaskProcessor implements TaskProcessor {
 
     private boolean needsRefinement(AgentRole role) {
         return switch (role) {
-            // don't refine the meta-roles (planning/research/QA verification/knowledge capture)
+            // don't refine the meta-roles (planning/research/QA verification/knowledge/explanation)
             case PROMPT_ENGINEER, BUSINESS_ANALYST, MARKET_RESEARCHER, TEAM_LEAD, QA_ENGINEER,
-                 KNOWLEDGE_CURATOR -> false;
+                 KNOWLEDGE_CURATOR, PROJECT_EXPLAINER -> false;
             default -> true;
         };
     }

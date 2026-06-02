@@ -2,7 +2,10 @@ package com.orchestration.mcp;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.orchestration.agent.Agent;
+import com.orchestration.agent.AgentPrompts;
+import com.orchestration.agent.AgentRole;
 import com.orchestration.engine.OrchestrationEngine;
+import com.orchestration.knowledge.ProjectKnowledgeStore;
 import com.orchestration.memory.MemoryStore;
 import com.orchestration.task.GraphSnapshot;
 import com.orchestration.web.ActiveProject;
@@ -13,6 +16,8 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * Implements the four MCP tools that let Claude Code drive the agent team. Bridges the JSON-RPC
@@ -28,16 +33,28 @@ public class OrchestrationMcpService {
     private final McpBridge bridge;
     private final MemoryStore memoryStore;
     private final ActiveProject activeProject;
+    private final ProjectKnowledgeStore knowledgeStore; // optional; used by explain(remember=true)
+    private final String workspaceDir;
     private final McpResponseMapper mapper = new McpResponseMapper();
 
     private volatile String activeProjectId;
+    // taskId -> rememberProject, for one-off "explain a prebuilt project" tasks (not engine tasks).
+    private final Map<String, Boolean> explainTasks = new ConcurrentHashMap<>();
 
     public OrchestrationMcpService(OrchestrationEngine engine, McpBridge bridge,
                                    MemoryStore memoryStore, ActiveProject activeProject) {
+        this(engine, bridge, memoryStore, activeProject, null, ".");
+    }
+
+    public OrchestrationMcpService(OrchestrationEngine engine, McpBridge bridge,
+                                   MemoryStore memoryStore, ActiveProject activeProject,
+                                   ProjectKnowledgeStore knowledgeStore, String workspaceDir) {
         this.engine = Objects.requireNonNull(engine, "engine");
         this.bridge = Objects.requireNonNull(bridge, "bridge");
         this.memoryStore = Objects.requireNonNull(memoryStore, "memoryStore");
         this.activeProject = Objects.requireNonNull(activeProject, "activeProject");
+        this.knowledgeStore = knowledgeStore;
+        this.workspaceDir = (workspaceDir == null || workspaceDir.isBlank()) ? "." : workspaceDir;
     }
 
     /** Start a project from a feature request; returns once the first agent task is ready. */
@@ -58,7 +75,8 @@ public class OrchestrationMcpService {
         Map<String, Object> options = Map.of("rememberProject", rememberProject);
         Thread.ofVirtual().name("mcp-project").start(() -> {
             try {
-                engine.submit(new OrchestrationEngine.ProjectRequest(featureRequest, options, Optional.of(2_000_000L)));
+                // tokenBudget empty -> the engine applies the configured ceiling (budgets.yml).
+                engine.submit(new OrchestrationEngine.ProjectRequest(featureRequest, options, Optional.empty()));
             } catch (RuntimeException e) {
                 System.err.println("[mcp] project submit failed: " + e);
             }
@@ -86,6 +104,49 @@ public class OrchestrationMcpService {
                         + "then ask you clarifying questions and ask you to confirm its understanding "
                         + "before writing any code — carry those to the user and back faithfully so the "
                         + "build matches what they actually want.");
+    }
+
+    /**
+     * Explain an existing, prebuilt project the team has no context of. Parks a single
+     * PROJECT_EXPLAINER task (no engine, no build): Claude reads the project at {@code path} and
+     * produces an explanation. When {@code rememberProject} is true and a knowledge store is wired,
+     * the explanation is also saved as the project brief so future sessions start with context.
+     */
+    public Map<String, Object> explain(String path, String question, boolean rememberProject) {
+        String target = (path == null || path.isBlank()) ? workspaceDir : path.trim();
+        String taskId = UUID.randomUUID().toString();
+        StringBuilder instructions = new StringBuilder(
+                "Explore and explain the existing, prebuilt project located at: ").append(target)
+                .append("\nRead its real files (entry points, build/config files, source, tests, docs) "
+                        + "with your tools, then explain what it does and how it works. Do NOT modify "
+                        + "any files — this is an explanation, not a change.");
+        if (question != null && !question.isBlank()) {
+            instructions.append("\nFocus especially on: ").append(question.trim());
+        }
+        McpBridge.PendingTask task = new McpBridge.PendingTask(
+                taskId, "explain-" + taskId, AgentRole.PROJECT_EXPLAINER.name(),
+                "Explain the project", instructions.toString(),
+                AgentPrompts.defaultPrompt(AgentRole.PROJECT_EXPLAINER), instructions.toString(),
+                "{\"status\":\"COMPLETED\",\"output\":{\"explanation\":\"Markdown explanation\","
+                        + "\"summary\":\"one-paragraph TL;DR\"}}",
+                Map.of(), McpBridge.Audience.AGENT);
+
+        explainTasks.put(taskId, rememberProject);
+        // Park it; the dispatch blocks until Claude submits — discard the result here, submit() owns it.
+        Thread.ofVirtual().name("mcp-explain").start(() -> {
+            try {
+                bridge.dispatch(task);
+            } catch (RuntimeException e) {
+                System.err.println("[mcp] explain dispatch failed: " + e);
+            }
+        });
+        return Map.of(
+                "nextAction", "CALL_NEXT",
+                "message", "Call orchestrate_next to get the PROJECT_EXPLAINER task, act as it (read the "
+                        + "project at " + target + " and explain it), then call orchestrate_submit with "
+                        + "the explanation. This is a one-off read-only task — after it, present the "
+                        + "explanation to the user."
+                        + (rememberProject ? " It will also be saved as the project brief." : ""));
     }
 
     /** Return the next agent task to fulfil, or the project status if none is pending. */
@@ -127,6 +188,14 @@ public class OrchestrationMcpService {
                             + "the failing tests, report the blocker to the user, and do not present this "
                             + "as a finished product.");
         }
+        if ("NEEDS_CLARIFICATION".equals(state)) {
+            // A worker is blocked for missing information that wasn't resolved (no answer from the
+            // user). Stop rather than polling forever — surface the open question to the user.
+            return Map.of("status", state, "nextAction", "STOP",
+                    "message", "Project is blocked awaiting clarification that wasn't resolved. Get the "
+                            + "missing information from the user, then start a fresh run with it. Do NOT "
+                            + "keep calling orchestrate_next — nothing will become ready until it's answered.");
+        }
         // Not finished but nothing ready this instant (a task is running): tell the client to retry.
         return Map.of("status", state, "nextAction", "CALL_NEXT",
                 "message", "No task ready this moment; call orchestrate_next again to continue the loop.");
@@ -162,6 +231,9 @@ public class OrchestrationMcpService {
             return Map.of("accepted", false, "error", "taskId is required");
         }
         Agent.Response response = mapper.parse(result);
+        if (explainTasks.containsKey(taskId)) {
+            return submitExplanation(taskId, response);
+        }
         boolean accepted = bridge.complete(taskId, response);
         if (!accepted) {
             return Map.of("accepted", false, "error", "unknown or already-completed taskId: " + taskId);
@@ -177,6 +249,29 @@ public class OrchestrationMcpService {
                         ? "Project " + state + ". Loop complete — summarize for the user."
                         : "Recorded. Immediately call orchestrate_next for the next task — keep looping "
                                 + "autonomously until nextAction is STOP.");
+    }
+
+    /** Deliver a PROJECT_EXPLAINER result: a one-off explanation, optionally saved as the brief. */
+    private Map<String, Object> submitExplanation(String taskId, Agent.Response response) {
+        boolean accepted = bridge.complete(taskId, response);
+        if (!accepted) {
+            return Map.of("accepted", false, "error", "unknown or already-completed taskId: " + taskId);
+        }
+        boolean remember = Boolean.TRUE.equals(explainTasks.remove(taskId));
+        Object explanation = response.structuredOutput().getOrDefault("explanation",
+                response.structuredOutput().get("summary"));
+        boolean saved = false;
+        if (remember && knowledgeStore != null && explanation != null
+                && !explanation.toString().isBlank()) {
+            knowledgeStore.save(explanation.toString(), taskId, AgentRole.PROJECT_EXPLAINER.name());
+            saved = true;
+        }
+        return Map.of(
+                "accepted", true,
+                "nextAction", "STOP",
+                "savedAsProjectBrief", saved,
+                "message", "Explanation complete — present output.explanation to the user."
+                        + (saved ? " It was also saved as the project brief for future sessions." : ""));
     }
 
     /** Current project status plus the task graph (states + dependencies). */

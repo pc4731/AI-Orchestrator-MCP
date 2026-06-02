@@ -4,6 +4,8 @@ import com.orchestration.agent.Agent;
 import com.orchestration.agent.AgentId;
 import com.orchestration.agent.AgentRole;
 import com.orchestration.agent.Capability;
+import com.orchestration.budget.TokenBudgetManager;
+import com.orchestration.llm.TokenUsage;
 import com.orchestration.task.Task;
 
 import java.util.Objects;
@@ -18,19 +20,30 @@ import java.util.Set;
  */
 public class McpAgent implements Agent {
 
+    /** Rough chars-per-token for estimating usage from text sizes (Claude Code reports no exact
+     *  counts to the tool, so the meter is approximate-but-proportional — enough for a ceiling). */
+    private static final int CHARS_PER_TOKEN = 4;
+
     private final AgentId id;
     private final AgentRole role;
     private final Set<Capability> capabilities;
     private final String systemPrompt;
     private final McpBridge bridge;
+    private final TokenBudgetManager budget; // optional; null disables MCP usage metering
 
     public McpAgent(AgentId id, AgentRole role, Set<Capability> capabilities,
                     String systemPrompt, McpBridge bridge) {
+        this(id, role, capabilities, systemPrompt, bridge, null);
+    }
+
+    public McpAgent(AgentId id, AgentRole role, Set<Capability> capabilities,
+                    String systemPrompt, McpBridge bridge, TokenBudgetManager budget) {
         this.id = Objects.requireNonNull(id, "id");
         this.role = Objects.requireNonNull(role, "role");
         this.capabilities = Set.copyOf(capabilities);
         this.systemPrompt = systemPrompt == null ? "" : systemPrompt;
         this.bridge = Objects.requireNonNull(bridge, "bridge");
+        this.budget = budget;
     }
 
     @Override
@@ -56,6 +69,7 @@ public class McpAgent implements Agent {
     @Override
     public Response handle(Request request, Context context) {
         Task task = request.task();
+        String instructions = instructions(request);
         McpBridge.PendingTask pending = new McpBridge.PendingTask(
                 task.id().value(),
                 context.projectId(),
@@ -63,10 +77,39 @@ public class McpAgent implements Agent {
                 task.title(),
                 task.description(),
                 systemPrompt,
-                instructions(request),
+                instructions,
                 schemaFor(role),
                 request.inputArtifacts());
-        return bridge.dispatch(pending);
+        Response response = bridge.dispatch(pending);
+        meter(context, task, request, instructions, response);
+        return response;
+    }
+
+    /**
+     * Estimate this turn's tokens from the text the engine actually exchanged (prompt + grounding in,
+     * structured output + artifacts out) and record it against the budget. Claude Code doesn't report
+     * exact counts to the tool, so this is an approximation — good enough for a cost circuit breaker.
+     */
+    private void meter(Context context, Task task, Request request, String instructions,
+                       Response response) {
+        if (budget == null) {
+            return;
+        }
+        long inChars = length(systemPrompt) + length(instructions) + length(task.description());
+        for (String g : request.inputArtifacts().values()) {
+            inChars += length(g);
+        }
+        long outChars = length(String.valueOf(response.structuredOutput()))
+                + length(response.escalationReason().orElse(""));
+        for (Agent.Artifact a : response.artifacts()) {
+            outChars += length(a.content());
+        }
+        TokenUsage estimate = new TokenUsage(inChars / CHARS_PER_TOKEN, outChars / CHARS_PER_TOKEN, 0, 0);
+        budget.record(context.projectId(), task.id(), estimate);
+    }
+
+    private static int length(String s) {
+        return s == null ? 0 : s.length();
     }
 
     private String instructions(Request request) {
@@ -219,6 +262,28 @@ public class McpAgent implements Agent {
                             + "files. When asked to write run instructions, produce a RUN.md at the repo "
                             + "root covering install, build, run, and test steps. Use only declared, "
                             + "verifiable dependencies; never invent APIs. Summarize in output.summary.";
+            case DEVOPS_ENGINEER ->
+                    "Make the project shippable using ONLY the stack the team actually built (read it "
+                            + "from the upstream grounding and the repo — never assume a different "
+                            + "language/framework). Produce, as artifacts: a Dockerfile (multi-stage, "
+                            + "non-root, minimal base) and a .dockerignore; a docker-compose.yml when "
+                            + "there are multiple services or a datastore; a CI workflow at "
+                            + ".github/workflows/ci.yml that installs, builds, and runs the project's "
+                            + "tests (use the provided testCommand); and deployment/config notes plus a "
+                            + ".env.example for required configuration (NEVER commit real secrets — read "
+                            + "them from env). Keep everything consistent with RUN.md. Validate that the "
+                            + "files reference real paths/commands; do not invent services the app does "
+                            + "not have. Summarize what you added and how to deploy in output.summary.";
+            case PROJECT_EXPLAINER ->
+                    "Read the existing, prebuilt project at the given path and explain it. Explore the "
+                            + "real files with your tools — entry points, build/config files, source, "
+                            + "tests, and docs — then explain WHAT it does and HOW: purpose and main "
+                            + "features; architecture and how the pieces fit; tech stack and key "
+                            + "dependencies; a map of the important files/modules; how to build, run, and "
+                            + "test it; and notable patterns, risks, or gotchas. Ground every statement in "
+                            + "files you actually read — never guess or invent behaviour; if something is "
+                            + "unclear, say so. Do NOT modify any files. Put the full explanation in "
+                            + "output.explanation as Markdown and a one-paragraph output.summary.";
             case KNOWLEDGE_CURATOR ->
                     "Distil everything the team produced (provided as grounding: the spec, market "
                             + "research, architecture, schema, UI design, code summaries, and the prior "
@@ -261,7 +326,10 @@ public class McpAgent implements Agent {
                     + "(roles: TEAM_LEAD, MARKET_RESEARCHER, BACKEND_ARCHITECT, FRONTEND_ARCHITECT, "
                     + "AI_ML_ARCHITECT, UI_DESIGNER, BACKEND_DEVELOPER, FRONTEND_DEVELOPER, "
                     + "AI_ML_DEVELOPER, QA_ENGINEER, DBA, SECURITY_REVIEWER, CODE_REVIEWER, "
-                    + "CONTENT_WRITER, SEO_EXPERT, KNOWLEDGE_CURATOR). Only add the AI_ML_* roles when "
+                    + "CONTENT_WRITER, SEO_EXPERT, DEVOPS_ENGINEER, KNOWLEDGE_CURATOR). Add a "
+                    + "DEVOPS_ENGINEER task (containerisation + CI + deploy config), depending on the "
+                    + "implementation tasks, whenever the result is a runnable app or service. Only add "
+                    + "the AI_ML_* roles when "
                     + "the app actually needs AI/ML — the AI/ML Architect will confirm AI-vs-library and "
                     + "the provider with the user. ONLY when the grounding says rememberProject=true, end "
                     + "the graph with a single KNOWLEDGE_CURATOR task that depends on all other tasks (it "

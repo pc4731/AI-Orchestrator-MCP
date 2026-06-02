@@ -7,6 +7,7 @@ import com.orchestration.agent.AgentPrompts;
 import com.orchestration.agent.AgentRole;
 import com.orchestration.agent.Capability;
 import com.orchestration.agent.SkillRegistry;
+import com.orchestration.budget.TokenBudgetManager;
 import com.orchestration.config.AgentDefinition;
 import com.orchestration.config.AgentsProperties;
 
@@ -27,11 +28,18 @@ public class McpAgentFactory implements AgentFactory {
     private final AgentsProperties agents;
     private final McpBridge bridge;
     private final SkillRegistry skills;
+    private final TokenBudgetManager budget; // optional; null disables MCP usage metering
 
     public McpAgentFactory(AgentsProperties agents, McpBridge bridge, SkillRegistry skills) {
+        this(agents, bridge, skills, null);
+    }
+
+    public McpAgentFactory(AgentsProperties agents, McpBridge bridge, SkillRegistry skills,
+                           TokenBudgetManager budget) {
         this.agents = Objects.requireNonNull(agents, "agents");
         this.bridge = Objects.requireNonNull(bridge, "bridge");
         this.skills = Objects.requireNonNull(skills, "skills");
+        this.budget = budget;
     }
 
     @Override
@@ -44,7 +52,7 @@ public class McpAgentFactory implements AgentFactory {
         String prompt = AgentPrompts.append(
                 AgentPrompts.load(definition.map(AgentDefinition::promptFile).orElse(null), role),
                 skills.resolve(skillNames));
-        return new McpAgent(AgentId.random(), role, capabilities, prompt, bridge);
+        return new McpAgent(AgentId.random(), role, capabilities, prompt, bridge, budget);
     }
 
     @Override

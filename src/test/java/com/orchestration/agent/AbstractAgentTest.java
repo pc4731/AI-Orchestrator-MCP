@@ -75,14 +75,17 @@ class AbstractAgentTest {
     }
 
     @Test
-    void escalatesOnTokenBudgetBreach() {
+    void metersUsageButNeverAbortsTheCallOnBudgetBreach() {
+        // Enforcement is a circuit breaker owned by the engine (between tasks); an individual agent
+        // call meters its usage but is never aborted or degraded, even past a tiny ceiling.
         DefaultTokenBudgetManager budget = new DefaultTokenBudgetManager();
-        budget.registerTaskBudget(new TaskId("t1"), 1); // each call uses 2 tokens total
+        budget.registerProjectBudget("p1", 1); // tiny ceiling; the call records more than this
 
         ScriptedLlmClient llm = new ScriptedLlmClient("{\"status\":\"COMPLETED\",\"confidence\":\"HIGH\"}");
         Agent.Response response = agent(llm, budget).handle(request(Map.of()), context());
 
-        assertEquals(Agent.Outcome.ESCALATE, response.outcome());
+        assertEquals(Agent.Outcome.COMPLETED, response.outcome());
+        assertTrue(budget.usedForProject("p1") > 0, "the call's usage is metered against the budget");
     }
 
     @Test

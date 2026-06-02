@@ -71,4 +71,10 @@ public class DefaultTokenBudgetManager implements TokenBudgetManager {
         long used = taskUsed.getOrDefault(taskId, new AtomicLong()).get();
         return budget - used;
     }
+
+    @Override
+    public long usedForProject(String projectId) {
+        AtomicLong used = projectUsed.get(projectId);
+        return used == null ? 0L : used.get();
+    }
 }

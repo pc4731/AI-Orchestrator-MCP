@@ -66,4 +66,27 @@ class McpAgentTest {
         String i = instructionsFor(AgentRole.BACKEND_DEVELOPER);
         assertTrue(i.contains("artifacts"));
     }
+
+    @Test
+    void metersEstimatedUsageWhenABudgetIsWired() throws Exception {
+        McpBridge bridge = new McpBridge();
+        com.orchestration.budget.DefaultTokenBudgetManager budget =
+                new com.orchestration.budget.DefaultTokenBudgetManager();
+        McpAgent agent = new McpAgent(AgentId.random(), AgentRole.BACKEND_DEVELOPER, Set.of(),
+                "persona", bridge, budget);
+        Task task = new Task(new TaskId("t1"), "Task", "desc", AgentRole.BACKEND_DEVELOPER,
+                WorkflowState.PENDING, List.of(), Map.of(), Instant.now(), Instant.now());
+
+        CompletableFuture<Agent.Response> f = CompletableFuture.supplyAsync(() -> agent.handle(
+                new Agent.Request(task, "build the thing",
+                        Map.of("spec", "a fairly long specification grounding block"), Map.of()),
+                new Agent.Context("p1", "t1", Map.of())));
+        bridge.poll(2000).orElseThrow();
+        bridge.complete("t1", new Agent.Response(Agent.Outcome.COMPLETED, Map.of("summary", "done"),
+                List.of(new Agent.Artifact("src/A.java", "class A {}", "text/plain")),
+                Agent.Confidence.HIGH, List.of(), Optional.empty()));
+        f.get(2, java.util.concurrent.TimeUnit.SECONDS);
+
+        assertTrue(budget.usedForProject("p1") > 0, "MCP turns must be metered (estimated)");
+    }
 }

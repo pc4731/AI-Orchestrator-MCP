@@ -69,7 +69,7 @@ class ConfigurationBindingTest {
         runner.run(context -> {
             BudgetProperties budgets = context.getBean(BudgetProperties.class);
             assertThat(budgets.bugLoop().maxRetries()).isEqualTo(3);
-            assertThat(budgets.onBreach()).isEqualTo(BudgetProperties.BreachAction.ESCALATE);
+            assertThat(budgets.onBreach()).isEqualTo(BudgetProperties.BreachAction.HALT);
 
             SandboxSettings sandbox = context.getBean(SandboxSettings.class);
             assertThat(sandbox.network()).isEqualTo("none");

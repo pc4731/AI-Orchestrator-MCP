@@ -107,6 +107,74 @@ class AgentTaskProcessorTest {
     }
 
     @Test
+    void blockedWorkerAsksTheUserAndResumesWithTheAnswer() {
+        java.util.concurrent.atomic.AtomicInteger calls = new java.util.concurrent.atomic.AtomicInteger();
+        AtomicReference<Map<String, String>> secondGrounding = new AtomicReference<>(Map.of());
+        Agent dev = new Agent() {
+            @Override public AgentId id() { return new AgentId("dev-1"); }
+            @Override public AgentRole role() { return AgentRole.BACKEND_DEVELOPER; }
+            @Override public Set<Capability> capabilities() { return Set.of(Capability.WRITE_CODE); }
+            @Override public boolean canHandle(Task task) { return true; }
+            @Override public Response handle(Request request, Context context) {
+                if (calls.incrementAndGet() == 1) {
+                    return new Response(Outcome.INSUFFICIENT_INFORMATION,
+                            Map.of("questions", List.of("Which database should I use?")),
+                            List.of(), Confidence.LOW, List.of(), Optional.empty());
+                }
+                secondGrounding.set(request.inputArtifacts());
+                return new Response(Outcome.COMPLETED, Map.of("summary", "done"),
+                        List.of(), Confidence.HIGH, List.of(), Optional.empty());
+            }
+        };
+        AtomicReference<List<String>> asked = new AtomicReference<>(List.of());
+        ClarificationGateway gateway = new ClarificationGateway() {
+            @Override public Optional<String> ask(String projectId, List<String> questions, String ctx) {
+                asked.set(List.copyOf(questions));
+                return Optional.of("Use Postgres");
+            }
+            @Override public Confirmation confirm(String projectId, String understanding) {
+                return Confirmation.approved();
+            }
+        };
+        AgentTaskProcessor processor = new AgentTaskProcessor(factoryReturning(dev),
+                new JGitArtifactRepository(repoDir), new InMemoryAuditLog(),
+                ".", List.of("./gradlew", "test"), 2, null, gateway);
+
+        Task task = new Task(new TaskId("t1"), "Build", "build it", AgentRole.BACKEND_DEVELOPER,
+                WorkflowState.PENDING, List.of(), Map.of(), Instant.now(), Instant.now());
+        Agent.Response response = processor.process("p1", task);
+
+        assertEquals(Agent.Outcome.COMPLETED, response.outcome(), "the task resolves after clarification");
+        assertEquals(2, calls.get(), "the worker re-runs once with the answer");
+        assertEquals(List.of("Which database should I use?"), asked.get());
+        assertTrue(secondGrounding.get().getOrDefault("userClarification", "").contains("Use Postgres"),
+                "the user's answer must reach the re-run as grounding");
+    }
+
+    @Test
+    void blockedWorkerStaysBlockedWithNoGateway() {
+        Agent dev = new Agent() {
+            @Override public AgentId id() { return new AgentId("dev-2"); }
+            @Override public AgentRole role() { return AgentRole.BACKEND_DEVELOPER; }
+            @Override public Set<Capability> capabilities() { return Set.of(Capability.WRITE_CODE); }
+            @Override public boolean canHandle(Task task) { return true; }
+            @Override public Response handle(Request request, Context context) {
+                return new Response(Outcome.INSUFFICIENT_INFORMATION,
+                        Map.of("questions", List.of("Which database?")),
+                        List.of(), Confidence.LOW, List.of(), Optional.empty());
+            }
+        };
+        // No gateway wired -> behaviour is unchanged: the blocked outcome is returned as-is.
+        AgentTaskProcessor processor = new AgentTaskProcessor(factoryReturning(dev),
+                new JGitArtifactRepository(repoDir), new InMemoryAuditLog());
+
+        Task task = new Task(new TaskId("t1"), "Build", "build it", AgentRole.BACKEND_DEVELOPER,
+                WorkflowState.PENDING, List.of(), Map.of(), Instant.now(), Instant.now());
+
+        assertEquals(Agent.Outcome.INSUFFICIENT_INFORMATION, processor.process("p1", task).outcome());
+    }
+
+    @Test
     void commitsArtifactsAndAuditsTheTask() {
         JGitArtifactRepository repo = new JGitArtifactRepository(repoDir);
         InMemoryAuditLog audit = new InMemoryAuditLog();

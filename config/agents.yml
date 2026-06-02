@@ -142,6 +142,14 @@ agents:
       max-output-tokens: 4096
       temperature: 0.3
 
+    devops-engineer:
+      role: DEVOPS_ENGINEER
+      model: sonnet
+      prompt-file: prompts/devops-engineer.md
+      capabilities: [AUTOMATE_DEPLOYMENT, WRITE_CODE]
+      max-output-tokens: 4096
+      temperature: 0.2
+
     knowledge-curator:
       role: KNOWLEDGE_CURATOR
       model: sonnet
@@ -149,4 +157,12 @@ agents:
       capabilities: [CURATE_KNOWLEDGE]
       # Keep the brief tight — it is re-sent as planning context on every future session.
       max-output-tokens: 2048
+      temperature: 0.2
+
+    project-explainer:
+      role: PROJECT_EXPLAINER
+      model: opus
+      prompt-file: prompts/project-explainer.md
+      capabilities: [EXPLAIN_PROJECT]
+      max-output-tokens: 4096
       temperature: 0.2

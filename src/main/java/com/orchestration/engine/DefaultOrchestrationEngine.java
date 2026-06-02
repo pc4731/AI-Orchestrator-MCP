@@ -2,6 +2,8 @@ package com.orchestration.engine;
 
 import com.orchestration.agent.Agent;
 import com.orchestration.audit.AuditLog;
+import com.orchestration.budget.DefaultTokenBudgetManager;
+import com.orchestration.budget.TokenBudgetManager;
 import com.orchestration.memory.MemoryStore;
 import com.orchestration.task.GraphSnapshot;
 import com.orchestration.task.InMemoryTaskGraph;
@@ -44,6 +46,8 @@ public class DefaultOrchestrationEngine implements OrchestrationEngine {
     private final TaskProcessor processor;
     private final MemoryStore memoryStore;
     private final AuditLog auditLog;
+    private final TokenBudgetManager budget;
+    private final long defaultProjectBudget;
     private final ExecutorService executor;
 
     private final Map<String, ProjectExecution> projects = new ConcurrentHashMap<>();
@@ -52,19 +56,43 @@ public class DefaultOrchestrationEngine implements OrchestrationEngine {
                                       TaskProcessor processor,
                                       MemoryStore memoryStore,
                                       AuditLog auditLog) {
-        this(planner, processor, memoryStore, auditLog, Executors.newVirtualThreadPerTaskExecutor());
+        this(planner, processor, memoryStore, auditLog,
+                new DefaultTokenBudgetManager(), Long.MAX_VALUE);
     }
 
-    /** Visible for tests that want to supply a deterministic executor. */
+    public DefaultOrchestrationEngine(ProjectPlanner planner,
+                                      TaskProcessor processor,
+                                      MemoryStore memoryStore,
+                                      AuditLog auditLog,
+                                      TokenBudgetManager budget,
+                                      long defaultProjectBudget) {
+        this(planner, processor, memoryStore, auditLog, budget, defaultProjectBudget,
+                Executors.newVirtualThreadPerTaskExecutor());
+    }
+
+    /** Visible for tests that want to supply a deterministic executor (unbounded budget). */
     DefaultOrchestrationEngine(ProjectPlanner planner,
                                TaskProcessor processor,
                                MemoryStore memoryStore,
                                AuditLog auditLog,
                                ExecutorService executor) {
+        this(planner, processor, memoryStore, auditLog,
+                new DefaultTokenBudgetManager(), Long.MAX_VALUE, executor);
+    }
+
+    DefaultOrchestrationEngine(ProjectPlanner planner,
+                               TaskProcessor processor,
+                               MemoryStore memoryStore,
+                               AuditLog auditLog,
+                               TokenBudgetManager budget,
+                               long defaultProjectBudget,
+                               ExecutorService executor) {
         this.planner = Objects.requireNonNull(planner, "planner");
         this.processor = Objects.requireNonNull(processor, "processor");
         this.memoryStore = Objects.requireNonNull(memoryStore, "memoryStore");
         this.auditLog = Objects.requireNonNull(auditLog, "auditLog");
+        this.budget = Objects.requireNonNull(budget, "budget");
+        this.defaultProjectBudget = defaultProjectBudget;
         this.executor = Objects.requireNonNull(executor, "executor");
     }
 
@@ -76,6 +104,8 @@ public class DefaultOrchestrationEngine implements OrchestrationEngine {
     public ProjectHandle submit(ProjectRequest request) {
         Objects.requireNonNull(request, "request");
         String projectId = UUID.randomUUID().toString();
+        // Register the cost ceiling before any agent runs, so planning usage counts toward it too.
+        budget.registerProjectBudget(projectId, request.tokenBudget().orElse(defaultProjectBudget));
         TaskGraph graph = planner.plan(projectId, request);
         ProjectExecution exec = new ProjectExecution(projectId, graph);
         projects.put(projectId, exec);
@@ -118,7 +148,7 @@ public class DefaultOrchestrationEngine implements OrchestrationEngine {
         List<Task> tasks = new ArrayList<>(exec.graph.tasks());
         int done = (int) tasks.stream().filter(t -> t.state() == WorkflowState.DONE).count();
         return new ProjectStatus(projectId, exec.state, tasks.size(), done,
-                exec.tokensUsed.get(), List.copyOf(exec.pendingGates.values()));
+                budget.usedForProject(projectId), List.copyOf(exec.pendingGates.values()));
     }
 
     @Override
@@ -163,6 +193,16 @@ public class DefaultOrchestrationEngine implements OrchestrationEngine {
     private void driveLoop(ProjectExecution exec) {
         try {
             while (!exec.paused) {
+                // Cost circuit breaker, checked BETWEEN task batches — never mid-task — so a task's
+                // internal rework / build-fix loops always run to completion and output quality is
+                // never degraded. Only the start of the NEXT batch is gated.
+                if (budget.remainingForProject(exec.projectId) <= 0) {
+                    audit(exec.projectId, null, AuditLog.EventType.STATE_CHANGE,
+                            "Token budget exhausted (used " + budget.usedForProject(exec.projectId)
+                                    + "); halting before starting more work");
+                    finish(exec, WorkflowState.BLOCKED);
+                    return;
+                }
                 Set<Task> ready = exec.graph.readyTasks();
                 if (ready.isEmpty()) {
                     if (exec.graph.isComplete()) {
@@ -322,7 +362,6 @@ public class DefaultOrchestrationEngine implements OrchestrationEngine {
     private static final class ProjectExecution {
         final String projectId;
         final TaskGraph graph;
-        final AtomicLong tokensUsed = new AtomicLong();
         final AtomicLong checkpointSeq = new AtomicLong();
         final Map<String, PendingGate> pendingGates = new ConcurrentHashMap<>();
         volatile WorkflowState state = WorkflowState.PENDING;

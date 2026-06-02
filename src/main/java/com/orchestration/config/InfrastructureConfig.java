@@ -137,17 +137,26 @@ public class InfrastructureConfig {
                                        AuditLog auditLog,
                                        WorkspaceProperties workspace,
                                        BudgetProperties budgets,
-                                       ProjectKnowledgeStore knowledgeStore) {
+                                       ProjectKnowledgeStore knowledgeStore,
+                                       ObjectProvider<ClarificationGateway> clarificationGateway) {
         int maxRework = budgets.bugLoop() != null ? budgets.bugLoop().maxRetries() : 2;
+        // The gateway is only defined under the mcp profile; when absent, a blocked worker keeps the
+        // engine's existing escalation behaviour.
         return new AgentTaskProcessor(agentFactory, artifactRepository, auditLog,
-                workspace.repoDir(), workspace.testCommand(), maxRework, knowledgeStore);
+                workspace.repoDir(), workspace.testCommand(), maxRework, knowledgeStore,
+                clarificationGateway.getIfAvailable());
     }
 
     @Bean(destroyMethod = "shutdown")
     public OrchestrationEngine orchestrationEngine(ProjectPlanner projectPlanner,
                                                    TaskProcessor taskProcessor,
                                                    MemoryStore memoryStore,
-                                                   AuditLog auditLog) {
-        return new DefaultOrchestrationEngine(projectPlanner, taskProcessor, memoryStore, auditLog);
+                                                   AuditLog auditLog,
+                                                   TokenBudgetManager tokenBudgetManager,
+                                                   BudgetProperties budgets) {
+        long defaultProjectBudget = budgets.project() != null && budgets.project().maxTokens() > 0
+                ? budgets.project().maxTokens() : Long.MAX_VALUE;
+        return new DefaultOrchestrationEngine(projectPlanner, taskProcessor, memoryStore, auditLog,
+                tokenBudgetManager, defaultProjectBudget);
     }
 }

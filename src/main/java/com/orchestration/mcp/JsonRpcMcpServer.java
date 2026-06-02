@@ -121,6 +121,16 @@ public class JsonRpcMcpServer {
                         + "nextAction=STOP, the project is finished — stop looping and summarize.",
                 objSchema(), (String[]) null));
         tools.add(toolSubmit());
+        tools.add(tool("orchestrate_explain",
+                "Explain an existing, prebuilt project the team has no context of — what it does and "
+                        + "how it works. Use this when the user asks you to read/understand a project "
+                        + "rather than build one. Returns nextAction=CALL_NEXT; then run the loop: "
+                        + "orchestrate_next gives a PROJECT_EXPLAINER task, you read the project and "
+                        + "explain it, then orchestrate_submit. Optional: path (defaults to the "
+                        + "workspace), question (what to focus on), rememberProject (also save the "
+                        + "explanation as the project brief for future sessions).",
+                objSchema().put("path", "string").put("question", "string")
+                        .put("rememberProject", "boolean"), (String[]) null));
         tools.add(tool("orchestrate_status",
                 "Get the current project state and task graph (states + dependencies).",
                 objSchema(), (String[]) null));
@@ -137,6 +147,8 @@ public class JsonRpcMcpServer {
                     args.path("rememberProject").asBoolean(false));
             case "orchestrate_next" -> service.next();
             case "orchestrate_submit" -> service.submit(args.path("taskId").asText(null), args.get("result"));
+            case "orchestrate_explain" -> service.explain(args.path("path").asText(null),
+                    args.path("question").asText(null), args.path("rememberProject").asBoolean(false));
             case "orchestrate_status" -> service.status();
             default -> null;
         };

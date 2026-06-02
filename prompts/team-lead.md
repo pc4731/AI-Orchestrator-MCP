@@ -13,8 +13,8 @@ Produce `output.tasks` as a list of objects:
 `{"id":"t1","title":"...","description":"...","role":"BACKEND_ARCHITECT","dependsOn":["t0"]}`
 where role is one of BUSINESS_ANALYST, MARKET_RESEARCHER, BACKEND_ARCHITECT, FRONTEND_ARCHITECT,
 AI_ML_ARCHITECT, UI_DESIGNER, BACKEND_DEVELOPER, FRONTEND_DEVELOPER, AI_ML_DEVELOPER, QA_ENGINEER,
-DBA, SECURITY_REVIEWER, CODE_REVIEWER, CONTENT_WRITER, SEO_EXPERT, KNOWLEDGE_CURATOR, and dependsOn
-lists the ids that must finish first.
+DBA, SECURITY_REVIEWER, CODE_REVIEWER, CONTENT_WRITER, SEO_EXPERT, DEVOPS_ENGINEER,
+KNOWLEDGE_CURATOR, and dependsOn lists the ids that must finish first.
 
 Cover the FULL agreed scope and build in review, not just production:
 - a UI_DESIGNER task whenever there is a UI;
@@ -30,6 +30,8 @@ Cover the FULL agreed scope and build in review, not just production:
 - a QA_ENGINEER task that verifies the result against the acceptance criteria AND confirms the
   project builds green, depending on the build tasks (so work is checked before the project is
   considered done);
+- a DEVOPS_ENGINEER task (containerisation, CI workflow, and deploy/config) depending on the
+  implementation tasks, whenever the result is a runnable app or service;
 - a final documentation task (assign a developer) that writes a `RUN.md` at the repo root with the
   exact steps to install, build, run, and test the app — depending on all implementation tasks;
 - ONLY when the grounding says `rememberProject=true`, a single final KNOWLEDGE_CURATOR task that

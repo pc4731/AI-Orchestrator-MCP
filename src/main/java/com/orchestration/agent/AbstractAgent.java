@@ -111,10 +111,9 @@ public abstract class AbstractAgent implements Agent {
 
             LlmClient.Response llmResponse = llm.complete(llmRequest);
 
-            Response budgetEscalation = recordUsage(context, request, llmResponse.usage());
-            if (budgetEscalation != null) {
-                return budgetEscalation;
-            }
+            // Meter real usage against the budget. Enforcement is a circuit breaker owned by the
+            // engine (checked between tasks), so we never abort a call mid-flight or degrade output.
+            recordUsage(context, request, llmResponse.usage());
 
             try {
                 JsonNode node = extractJson(llmResponse.content());
@@ -166,14 +165,11 @@ public abstract class AbstractAgent implements Agent {
     // Parsing helpers
     // ------------------------------------------------------------------------
 
-    private Response recordUsage(Context context, Request request, com.orchestration.llm.TokenUsage usage) {
+    /** Meter this call's real token usage against the budget. Recording only — the engine decides
+     *  whether to stop the project (between tasks), so a single call is never aborted or trimmed. */
+    private void recordUsage(Context context, Request request, com.orchestration.llm.TokenUsage usage) {
         TaskId taskId = request.task() != null ? request.task().id() : null;
-        TokenBudgetManager.BudgetDecision decision = budget.record(context.projectId(), taskId, usage);
-        if (decision != TokenBudgetManager.BudgetDecision.WITHIN_BUDGET) {
-            return new Response(Outcome.ESCALATE, Map.of("budget", decision.name()), List.of(),
-                    Confidence.HIGH, List.of(), Optional.of("Token budget breached: " + decision));
-        }
-        return null;
+        budget.record(context.projectId(), taskId, usage);
     }
 
     private JsonNode extractJson(String content) {
