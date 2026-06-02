@@ -7,6 +7,7 @@ import com.orchestration.agent.AgentRole;
 import com.orchestration.agent.Capability;
 import com.orchestration.artifact.JGitArtifactRepository;
 import com.orchestration.audit.InMemoryAuditLog;
+import com.orchestration.knowledge.ProjectKnowledgeStore;
 import com.orchestration.task.Task;
 import com.orchestration.task.TaskId;
 import com.orchestration.task.WorkflowState;
@@ -70,6 +71,39 @@ class AgentTaskProcessorTest {
             @Override public boolean supports(AgentRole role) { return role == agent.role(); }
             @Override public Set<AgentRole> supportedRoles() { return Set.of(agent.role()); }
         };
+    }
+
+    /** A Knowledge Curator that returns a brief in output.knowledge and no artifacts. */
+    private static Agent curatorAgent(String brief) {
+        return new Agent() {
+            @Override public AgentId id() { return new AgentId("kc-1"); }
+            @Override public AgentRole role() { return AgentRole.KNOWLEDGE_CURATOR; }
+            @Override public Set<Capability> capabilities() { return Set.of(Capability.CURATE_KNOWLEDGE); }
+            @Override public boolean canHandle(Task task) { return true; }
+            @Override public Response handle(Request request, Context context) {
+                return new Response(Outcome.COMPLETED, Map.of("knowledge", brief),
+                        List.of(), Confidence.HIGH, List.of(), Optional.empty());
+            }
+        };
+    }
+
+    @Test
+    void knowledgeCuratorOutputIsCommittedAsTheProjectBrief() {
+        JGitArtifactRepository repo = new JGitArtifactRepository(repoDir);
+        ProjectKnowledgeStore store = new ProjectKnowledgeStore(repo);
+        String brief = "# Project brain\nDoes things. Built with Java.";
+        AgentTaskProcessor processor = new AgentTaskProcessor(
+                factoryReturning(curatorAgent(brief)), repo, new InMemoryAuditLog(),
+                ".", List.of("./gradlew", "test"), 0, store);
+
+        Task task = new Task(new TaskId("kc"), "Curate knowledge", "write the brief",
+                AgentRole.KNOWLEDGE_CURATOR, WorkflowState.PENDING, List.of(), Map.of(),
+                Instant.now(), Instant.now());
+        processor.process("p1", task);
+
+        // The curator's brief is committed as the knowledge file, and a fresh store reads it back.
+        assertEquals(brief, repo.read(ProjectKnowledgeStore.DEFAULT_PATH).orElseThrow());
+        assertEquals(brief, new ProjectKnowledgeStore(repo).load().orElseThrow());
     }
 
     @Test

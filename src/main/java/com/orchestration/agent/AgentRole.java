@@ -26,5 +26,6 @@ public enum AgentRole {
     SECURITY_REVIEWER,
     CODE_REVIEWER,
     CONTENT_WRITER,
-    SEO_EXPERT
+    SEO_EXPERT,
+    KNOWLEDGE_CURATOR
 }

@@ -16,6 +16,12 @@ spring:
 workspace:
   # Git-backed working directory where agents write code/artifacts.
   repo-dir: ./data/repo
+  # Committed "project brain" (plaintext Markdown) so a new session starts with context instead of
+  # re-reading the whole codebase. It summarises code that ships in the same repo, so it is not
+  # encrypted; set enabled:false to turn the feature off (team then works from the code).
+  knowledge:
+    enabled: true
+    path: .project/knowledge.md
 
 logging:
   level:

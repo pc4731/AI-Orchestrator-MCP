@@ -141,3 +141,12 @@ agents:
       skills: [accessibility]
       max-output-tokens: 4096
       temperature: 0.3
+
+    knowledge-curator:
+      role: KNOWLEDGE_CURATOR
+      model: sonnet
+      prompt-file: prompts/knowledge-curator.md
+      capabilities: [CURATE_KNOWLEDGE]
+      # Keep the brief tight — it is re-sent as planning context on every future session.
+      max-output-tokens: 2048
+      temperature: 0.2

@@ -219,6 +219,22 @@ public class McpAgent implements Agent {
                             + "files. When asked to write run instructions, produce a RUN.md at the repo "
                             + "root covering install, build, run, and test steps. Use only declared, "
                             + "verifiable dependencies; never invent APIs. Summarize in output.summary.";
+            case KNOWLEDGE_CURATOR ->
+                    "Distil everything the team produced (provided as grounding: the spec, market "
+                            + "research, architecture, schema, UI design, code summaries, and the prior "
+                            + "projectKnowledge if this is an edit) into a concise, structured project "
+                            + "brief whose ONLY purpose is to let a future session understand the project "
+                            + "WITHOUT re-reading the whole codebase. Put the full brief in "
+                            + "output.knowledge as Markdown covering: what the project does and for whom; "
+                            + "the architecture and how the pieces fit; the tech stack and key "
+                            + "dependencies; a module/file map (path → responsibility); important design "
+                            + "decisions and trade-offs (and why); data model; how to build/run/test; and "
+                            + "known gotchas/TODOs. If prior projectKnowledge exists, UPDATE it to reflect "
+                            + "this change rather than rewriting from scratch. Be accurate and grounded — "
+                            + "never invent files or behaviour. Keep it TIGHT (a fast, complete mental "
+                            + "model, not exhaustive prose). Do NOT return any artifacts: the system "
+                            + "commits the brief as the project knowledge file itself. Everything goes in "
+                            + "output.knowledge.";
             case QA_ENGINEER ->
                     "Verify the implementation by actually RUNNING the project's test command in the "
                             + "repo (use the testCommand and workingDir provided), not by reasoning. The "
@@ -245,9 +261,12 @@ public class McpAgent implements Agent {
                     + "(roles: TEAM_LEAD, MARKET_RESEARCHER, BACKEND_ARCHITECT, FRONTEND_ARCHITECT, "
                     + "AI_ML_ARCHITECT, UI_DESIGNER, BACKEND_DEVELOPER, FRONTEND_DEVELOPER, "
                     + "AI_ML_DEVELOPER, QA_ENGINEER, DBA, SECURITY_REVIEWER, CODE_REVIEWER, "
-                    + "CONTENT_WRITER, SEO_EXPERT). Only add the AI_ML_* roles when the app actually "
-                    + "needs AI/ML — the AI/ML Architect will confirm AI-vs-library and the provider "
-                    + "with the user.";
+                    + "CONTENT_WRITER, SEO_EXPERT, KNOWLEDGE_CURATOR). Only add the AI_ML_* roles when "
+                    + "the app actually needs AI/ML — the AI/ML Architect will confirm AI-vs-library and "
+                    + "the provider with the user. ONLY when the grounding says rememberProject=true, end "
+                    + "the graph with a single KNOWLEDGE_CURATOR task that depends on all other tasks (it "
+                    + "records a committed project brief so a future session has full context without "
+                    + "re-reading the code); when rememberProject=false, do NOT add a curator task.";
         }
         return base;
     }

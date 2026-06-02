@@ -5,6 +5,7 @@ import com.orchestration.agent.AgentFactory;
 import com.orchestration.agent.AgentRole;
 import com.orchestration.artifact.ArtifactRepository;
 import com.orchestration.audit.AuditLog;
+import com.orchestration.knowledge.ProjectKnowledgeStore;
 import com.orchestration.task.Task;
 import com.orchestration.task.TaskId;
 import com.orchestration.task.WorkflowState;
@@ -51,15 +52,16 @@ public class AgentTaskProcessor implements TaskProcessor {
     private final String workingDir;
     private final List<String> defaultTestCommand;
     private final int maxReworkAttempts;
+    private final ProjectKnowledgeStore knowledgeStore; // optional; null disables the project brain
 
     // Completed task outputs, keyed by task id, shared across the project's tasks.
     private final Map<String, Handoff> handoffs = new ConcurrentHashMap<>();
 
-    /** Convenience for tests: working dir ".", Gradle test command, 2 rework attempts. */
+    /** Convenience for tests: working dir ".", Gradle test command, 2 rework attempts, no knowledge. */
     public AgentTaskProcessor(AgentFactory agentFactory,
                               ArtifactRepository artifactRepository,
                               AuditLog auditLog) {
-        this(agentFactory, artifactRepository, auditLog, ".", List.of("./gradlew", "test"), 2);
+        this(agentFactory, artifactRepository, auditLog, ".", List.of("./gradlew", "test"), 2, null);
     }
 
     public AgentTaskProcessor(AgentFactory agentFactory,
@@ -68,12 +70,24 @@ public class AgentTaskProcessor implements TaskProcessor {
                               String workingDir,
                               List<String> defaultTestCommand,
                               int maxReworkAttempts) {
+        this(agentFactory, artifactRepository, auditLog, workingDir, defaultTestCommand,
+                maxReworkAttempts, null);
+    }
+
+    public AgentTaskProcessor(AgentFactory agentFactory,
+                              ArtifactRepository artifactRepository,
+                              AuditLog auditLog,
+                              String workingDir,
+                              List<String> defaultTestCommand,
+                              int maxReworkAttempts,
+                              ProjectKnowledgeStore knowledgeStore) {
         this.agentFactory = Objects.requireNonNull(agentFactory, "agentFactory");
         this.artifactRepository = Objects.requireNonNull(artifactRepository, "artifactRepository");
         this.auditLog = Objects.requireNonNull(auditLog, "auditLog");
         this.workingDir = Objects.requireNonNull(workingDir, "workingDir");
         this.defaultTestCommand = List.copyOf(defaultTestCommand);
         this.maxReworkAttempts = Math.max(0, maxReworkAttempts);
+        this.knowledgeStore = knowledgeStore;
     }
 
     @Override
@@ -99,6 +113,8 @@ public class AgentTaskProcessor implements TaskProcessor {
 
         // Publish this task's output to the collaboration board for downstream agents.
         recordHandoff(task, agent, response);
+        // The Knowledge Curator's brief is committed as the project knowledge file for future sessions.
+        persistKnowledge(projectId, task, agent, response);
         return response;
     }
 
@@ -279,6 +295,28 @@ public class AgentTaskProcessor implements TaskProcessor {
         handoffs.put(task.id().value(), new Handoff(agent.role().name(), summary));
     }
 
+    /** When the Knowledge Curator finishes, commit its brief as the project knowledge file. */
+    private void persistKnowledge(String projectId, Task task, Agent agent, Agent.Response response) {
+        if (knowledgeStore == null || agent.role() != AgentRole.KNOWLEDGE_CURATOR || response == null) {
+            return;
+        }
+        Object knowledge = response.structuredOutput().getOrDefault("knowledge",
+                response.structuredOutput().get("summary"));
+        if (knowledge == null || knowledge.toString().isBlank()) {
+            return;
+        }
+        try {
+            knowledgeStore.save(knowledge.toString(), task.id().value(), agent.role().name());
+            audit(projectId, task, agent, AuditLog.EventType.RESPONSE,
+                    "KNOWLEDGE_CURATOR committed the project knowledge brief",
+                    Map.of("role", AgentRole.KNOWLEDGE_CURATOR.name(),
+                            "detail", "project knowledge file updated"));
+        } catch (RuntimeException e) {
+            audit(projectId, task, agent, AuditLog.EventType.ERROR,
+                    "Failed to persist project knowledge: " + e, Map.of());
+        }
+    }
+
     /** Run the Prompt Engineer to sharpen the prompt for worker roles; empty for non-worker roles
      *  or when PROMPT_ENGINEER is not configured. Best-effort — never fails the task. */
     private String refinePrompt(String projectId, Task task) {
@@ -312,8 +350,9 @@ public class AgentTaskProcessor implements TaskProcessor {
 
     private boolean needsRefinement(AgentRole role) {
         return switch (role) {
-            // don't refine the meta-roles (planning/research/QA verification)
-            case PROMPT_ENGINEER, BUSINESS_ANALYST, MARKET_RESEARCHER, TEAM_LEAD, QA_ENGINEER -> false;
+            // don't refine the meta-roles (planning/research/QA verification/knowledge capture)
+            case PROMPT_ENGINEER, BUSINESS_ANALYST, MARKET_RESEARCHER, TEAM_LEAD, QA_ENGINEER,
+                 KNOWLEDGE_CURATOR -> false;
             default -> true;
         };
     }

@@ -4,6 +4,7 @@ import com.orchestration.agent.Agent;
 import com.orchestration.agent.AgentFactory;
 import com.orchestration.agent.AgentRole;
 import com.orchestration.audit.AuditLog;
+import com.orchestration.knowledge.ProjectKnowledgeStore;
 import com.orchestration.task.InMemoryTaskGraph;
 import com.orchestration.task.Task;
 import com.orchestration.task.TaskGraph;
@@ -35,20 +36,27 @@ public class TeamLeadProjectPlanner implements ProjectPlanner {
     private final AgentFactory agentFactory;
     private final AuditLog auditLog; // optional; when present, planning steps stream to the UI
     private final ClarificationGateway clarifier; // optional; when present, the BA loop asks the user
+    private final ProjectKnowledgeStore knowledgeStore; // optional; the prior project brief, if any
 
     public TeamLeadProjectPlanner(AgentFactory agentFactory) {
-        this(agentFactory, null, null);
+        this(agentFactory, null, null, null);
     }
 
     public TeamLeadProjectPlanner(AgentFactory agentFactory, AuditLog auditLog) {
-        this(agentFactory, auditLog, null);
+        this(agentFactory, auditLog, null, null);
     }
 
     public TeamLeadProjectPlanner(AgentFactory agentFactory, AuditLog auditLog,
                                   ClarificationGateway clarifier) {
+        this(agentFactory, auditLog, clarifier, null);
+    }
+
+    public TeamLeadProjectPlanner(AgentFactory agentFactory, AuditLog auditLog,
+                                  ClarificationGateway clarifier, ProjectKnowledgeStore knowledgeStore) {
         this.agentFactory = Objects.requireNonNull(agentFactory, "agentFactory");
         this.auditLog = auditLog;
         this.clarifier = clarifier;
+        this.knowledgeStore = knowledgeStore;
     }
 
     /** The result of the clarification loop: the agreed spec plus the accumulated Q&amp;A trail. */
@@ -65,19 +73,30 @@ public class TeamLeadProjectPlanner implements ProjectPlanner {
 
     @Override
     public TaskGraph plan(String projectId, OrchestrationEngine.ProjectRequest request) {
+        // Opt-in: the project brain is only worth its cost for projects you'll continue across
+        // sessions. It is OFF by default, so a one-shot run pays nothing for it.
+        boolean rememberProject = rememberProject(request);
+
+        // 0) Prior project brain: if remembering is on and this repo already has a committed knowledge
+        //    file, hand it to the team as context so an EDIT starts from understanding, not a re-read.
+        String priorKnowledge = rememberProject ? loadPriorKnowledge() : "";
+
         // 1) Market Researcher studies comparable tools, their complaints, and recommends features —
         //    up front, so the questions the BA asks the user are informed by what the market shows.
-        String marketResearch = researchMarket(projectId, request, "");
+        String marketResearch = researchMarket(projectId, request, priorKnowledge);
 
         // 2) Clarification loop: the BA drafts a spec, asks the user the open questions, folds the
         //    answers back in, and repeats until the understanding is confirmed (or the cap is hit).
-        Clarified clarified = clarifyRequirements(projectId, request, marketResearch);
+        Clarified clarified = clarifyRequirements(projectId, request, marketResearch, priorKnowledge);
         String specification = clarified.specification();
 
         // 3) Team Lead decomposes the AGREED request + spec + research into a task graph.
         Agent teamLead = agentFactory.create(AgentRole.TEAM_LEAD);
         Task planningTask = newTask(TaskId.random(), "Plan project", request.featureRequest(), AgentRole.TEAM_LEAD);
         Map<String, String> grounding = new HashMap<>();
+        if (!priorKnowledge.isBlank()) {
+            grounding.put("projectKnowledge", priorKnowledge);
+        }
         if (!specification.isBlank()) {
             grounding.put("specification", specification);
         }
@@ -87,6 +106,9 @@ public class TeamLeadProjectPlanner implements ProjectPlanner {
         if (!marketResearch.isBlank()) {
             grounding.put("marketResearch", marketResearch);
         }
+        // Tell the Team Lead whether to bother planning a knowledge-capture task (it is also
+        // enforced below by stripping any curator task when remembering is off).
+        grounding.put("rememberProject", Boolean.toString(rememberProject));
 
         planAudit(projectId, AgentRole.TEAM_LEAD.name(), AuditLog.EventType.PROMPT,
                 "TEAM_LEAD decomposing the request into tasks",
@@ -99,6 +121,13 @@ public class TeamLeadProjectPlanner implements ProjectPlanner {
 
         InMemoryTaskGraph graph = new InMemoryTaskGraph();
         List<Map<String, Object>> taskSpecs = extractTasks(response);
+        if (!rememberProject) {
+            // Enforce opt-in: drop any knowledge-capture task the Team Lead added. Nothing depends on
+            // the curator (it is the terminal node), so removing it leaves no dangling dependencies.
+            taskSpecs = taskSpecs.stream()
+                    .filter(spec -> parseRole(spec.get("role")) != AgentRole.KNOWLEDGE_CURATOR)
+                    .toList();
+        }
         if (taskSpecs.isEmpty()) {
             graph.addTask(newTask(TaskId.random(), "Clarify and plan the request",
                     request.featureRequest(), AgentRole.TEAM_LEAD));
@@ -149,7 +178,7 @@ public class TeamLeadProjectPlanner implements ProjectPlanner {
      * it degrades to the old single forward pass on the raw request — no interaction.
      */
     private Clarified clarifyRequirements(String projectId, OrchestrationEngine.ProjectRequest request,
-                                          String marketResearch) {
+                                          String marketResearch, String priorKnowledge) {
         if (!agentFactory.supports(AgentRole.BUSINESS_ANALYST)) {
             return new Clarified("", "");
         }
@@ -158,7 +187,8 @@ public class TeamLeadProjectPlanner implements ProjectPlanner {
         int maxRounds = clarifier == null ? 1 : MAX_CLARIFICATION_ROUNDS;
 
         for (int round = 1; round <= maxRounds; round++) {
-            Agent.Response r = runBusinessAnalyst(projectId, request, marketResearch, trail.toString(), round);
+            Agent.Response r = runBusinessAnalyst(projectId, request, marketResearch, priorKnowledge,
+                    trail.toString(), round);
             specification = stringOutput(r, "specification");
             List<String> questions = extractQuestions(r);
             boolean needsAnswers = r.outcome() == Agent.Outcome.INSUFFICIENT_INFORMATION
@@ -194,13 +224,28 @@ public class TeamLeadProjectPlanner implements ProjectPlanner {
         return new Clarified(specification, trail.toString().strip());
     }
 
+    /** Whether this project opted in to the persistent project brain (default false). */
+    private static boolean rememberProject(OrchestrationEngine.ProjectRequest request) {
+        Object flag = request.options().get("rememberProject");
+        return flag != null && Boolean.parseBoolean(flag.toString());
+    }
+
+    /** The prior committed project brief for this session, or "" if none/disabled. */
+    private String loadPriorKnowledge() {
+        return knowledgeStore == null ? "" : knowledgeStore.load().orElse("");
+    }
+
     /** One Business Analyst pass, grounded with the market research and the running Q&amp;A trail. */
     private Agent.Response runBusinessAnalyst(String projectId, OrchestrationEngine.ProjectRequest request,
-                                              String marketResearch, String trail, int round) {
+                                              String marketResearch, String priorKnowledge,
+                                              String trail, int round) {
         Agent ba = agentFactory.create(AgentRole.BUSINESS_ANALYST);
         Task baTask = newTask(TaskId.random(), "Clarify requirements",
                 request.featureRequest(), AgentRole.BUSINESS_ANALYST);
         Map<String, String> grounding = new HashMap<>();
+        if (!priorKnowledge.isBlank()) {
+            grounding.put("projectKnowledge", priorKnowledge);
+        }
         if (!marketResearch.isBlank()) {
             grounding.put("marketResearch", marketResearch);
         }
@@ -284,7 +329,7 @@ public class TeamLeadProjectPlanner implements ProjectPlanner {
      * configured or it returns nothing, planning proceeds without it.
      */
     private String researchMarket(String projectId, OrchestrationEngine.ProjectRequest request,
-                                  String specification) {
+                                  String priorKnowledge) {
         if (!agentFactory.supports(AgentRole.MARKET_RESEARCHER)) {
             return "";
         }
@@ -292,8 +337,8 @@ public class TeamLeadProjectPlanner implements ProjectPlanner {
             Agent researcher = agentFactory.create(AgentRole.MARKET_RESEARCHER);
             Task task = newTask(TaskId.random(), "Research the market",
                     request.featureRequest(), AgentRole.MARKET_RESEARCHER);
-            Map<String, String> grounding = specification.isBlank()
-                    ? Map.of() : Map.of("specification", specification);
+            Map<String, String> grounding = priorKnowledge.isBlank()
+                    ? Map.of() : Map.of("projectKnowledge", priorKnowledge);
             planAudit(projectId, AgentRole.MARKET_RESEARCHER.name(), AuditLog.EventType.PROMPT,
                     "MARKET_RESEARCHER researching comparable tools and their complaints",
                     Map.of("role", "MARKET_RESEARCHER", "collaborator", "BUSINESS_ANALYST",

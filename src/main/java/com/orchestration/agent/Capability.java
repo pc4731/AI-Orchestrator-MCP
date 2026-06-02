@@ -23,5 +23,6 @@ public enum Capability {
     SECURITY_AUDIT,
     WRITE_CONTENT,
     OPTIMIZE_SEO,
+    CURATE_KNOWLEDGE,
     EXECUTE_TOOLS
 }

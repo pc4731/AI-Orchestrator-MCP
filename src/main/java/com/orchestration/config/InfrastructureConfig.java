@@ -20,6 +20,7 @@ import com.orchestration.engine.OrchestrationEngine;
 import com.orchestration.engine.ProjectPlanner;
 import com.orchestration.engine.TaskProcessor;
 import com.orchestration.engine.TeamLeadProjectPlanner;
+import com.orchestration.knowledge.ProjectKnowledgeStore;
 import com.orchestration.llm.LlmClient;
 import com.orchestration.memory.MemoryStore;
 import com.orchestration.memory.NoOpSemanticMemory;
@@ -80,6 +81,12 @@ public class InfrastructureConfig {
     }
 
     @Bean
+    public ProjectKnowledgeStore projectKnowledgeStore(ArtifactRepository artifactRepository,
+                                                       KnowledgeProperties knowledge) {
+        return new ProjectKnowledgeStore(artifactRepository, knowledge.active(), knowledge.path());
+    }
+
+    @Bean
     @Profile("!demo & !ui")
     public ToolExecutor toolExecutor(SandboxSettings sandboxSettings) {
         return new DockerToolExecutor(sandboxSettings);
@@ -115,10 +122,13 @@ public class InfrastructureConfig {
 
     @Bean
     public ProjectPlanner projectPlanner(AgentFactory agentFactory, AuditLog auditLog,
-                                         ObjectProvider<ClarificationGateway> clarificationGateway) {
+                                         ObjectProvider<ClarificationGateway> clarificationGateway,
+                                         ProjectKnowledgeStore knowledgeStore) {
         // The gateway is only defined under the mcp profile (Claude Code relays to the human); when
-        // absent the planner runs its single-pass behaviour with no human in the loop.
-        return new TeamLeadProjectPlanner(agentFactory, auditLog, clarificationGateway.getIfAvailable());
+        // absent the planner runs its single-pass behaviour with no human in the loop. The knowledge
+        // store gives the team prior context on edits (inert when the feature is disabled).
+        return new TeamLeadProjectPlanner(agentFactory, auditLog,
+                clarificationGateway.getIfAvailable(), knowledgeStore);
     }
 
     @Bean
@@ -126,10 +136,11 @@ public class InfrastructureConfig {
                                        ArtifactRepository artifactRepository,
                                        AuditLog auditLog,
                                        WorkspaceProperties workspace,
-                                       BudgetProperties budgets) {
+                                       BudgetProperties budgets,
+                                       ProjectKnowledgeStore knowledgeStore) {
         int maxRework = budgets.bugLoop() != null ? budgets.bugLoop().maxRetries() : 2;
         return new AgentTaskProcessor(agentFactory, artifactRepository, auditLog,
-                workspace.repoDir(), workspace.testCommand(), maxRework);
+                workspace.repoDir(), workspace.testCommand(), maxRework, knowledgeStore);
     }
 
     @Bean(destroyMethod = "shutdown")

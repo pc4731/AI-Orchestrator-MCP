@@ -108,8 +108,12 @@ public class JsonRpcMcpServer {
                         + "After calling this, run the loop AUTONOMOUSLY: repeatedly call orchestrate_next, "
                         + "act as the returned agent, and call orchestrate_submit — without pausing to ask "
                         + "the user — until a response has nextAction=STOP. Each response carries a "
-                        + "nextAction field telling you the next tool to call.",
-                objSchema().put("featureRequest", "string"), "featureRequest"));
+                        + "nextAction field telling you the next tool to call. Set rememberProject=true "
+                        + "ONLY for a project you will continue across sessions: it records a committed "
+                        + "knowledge brief and reads it back next time so the team skips re-reading the "
+                        + "code. Leave it false (default) for one-shot builds.",
+                objSchema().put("featureRequest", "string").put("rememberProject", "boolean"),
+                "featureRequest"));
         tools.add(tool("orchestrate_next",
                 "Get the next agent task (role, persona, instructions, responseSchema). You then BECOME "
                         + "that agent: produce its output per the schema and call orchestrate_submit with the "
@@ -129,7 +133,8 @@ public class JsonRpcMcpServer {
         String name = params.path("name").asText("");
         JsonNode args = params.path("arguments");
         Object payload = switch (name) {
-            case "orchestrate_start" -> service.start(args.path("featureRequest").asText(null));
+            case "orchestrate_start" -> service.start(args.path("featureRequest").asText(null),
+                    args.path("rememberProject").asBoolean(false));
             case "orchestrate_next" -> service.next();
             case "orchestrate_submit" -> service.submit(args.path("taskId").asText(null), args.get("result"));
             case "orchestrate_status" -> service.status();

@@ -231,6 +231,109 @@ class TeamLeadProjectPlannerTest {
     }
 
     @Test
+    void priorProjectKnowledgeIsInjectedIntoPlanningGrounding() {
+        java.util.concurrent.atomic.AtomicReference<Map<String, String>> tlGrounding =
+                new java.util.concurrent.atomic.AtomicReference<>(Map.of());
+        Agent tl = new Agent() {
+            @Override public AgentId id() { return new AgentId("tl"); }
+            @Override public AgentRole role() { return AgentRole.TEAM_LEAD; }
+            @Override public Set<Capability> capabilities() { return Set.of(Capability.DECOMPOSE_TASKS); }
+            @Override public boolean canHandle(Task task) { return true; }
+            @Override public Response handle(Request request, Context context) {
+                tlGrounding.set(request.inputArtifacts());
+                return new Response(Outcome.COMPLETED,
+                        Map.of("tasks", List.of(Map.of("id", "t1", "title", "Build",
+                                "role", "BACKEND_DEVELOPER", "dependsOn", List.of()))),
+                        List.of(), Confidence.HIGH, List.of(), Optional.empty());
+            }
+        };
+        AgentFactory factory = new AgentFactory() {
+            @Override public Agent create(AgentRole role) { return tl; }
+            @Override public boolean supports(AgentRole role) { return role == AgentRole.TEAM_LEAD; }
+            @Override public Set<AgentRole> supportedRoles() { return Set.of(AgentRole.TEAM_LEAD); }
+        };
+
+        com.orchestration.knowledge.ProjectKnowledgeStore store =
+                storeReturning("PRIOR-BRIEF: the app does X with Y");
+
+        // Opt in to the project brain for this run.
+        OrchestrationEngine.ProjectRequest remembered = new OrchestrationEngine.ProjectRequest(
+                "build a todo app", Map.of("rememberProject", true), Optional.empty());
+        new TeamLeadProjectPlanner(factory, null, null, store).plan("p1", remembered);
+
+        assertEquals("PRIOR-BRIEF: the app does X with Y",
+                tlGrounding.get().get("projectKnowledge"),
+                "a remembered project must receive the prior brief as context, not re-derive it");
+    }
+
+    @Test
+    void priorKnowledgeIsNotReadWhenRememberProjectIsOff() {
+        java.util.concurrent.atomic.AtomicReference<Map<String, String>> tlGrounding =
+                new java.util.concurrent.atomic.AtomicReference<>(Map.of());
+        Agent tl = new Agent() {
+            @Override public AgentId id() { return new AgentId("tl"); }
+            @Override public AgentRole role() { return AgentRole.TEAM_LEAD; }
+            @Override public Set<Capability> capabilities() { return Set.of(Capability.DECOMPOSE_TASKS); }
+            @Override public boolean canHandle(Task task) { return true; }
+            @Override public Response handle(Request request, Context context) {
+                tlGrounding.set(request.inputArtifacts());
+                return new Response(Outcome.COMPLETED,
+                        Map.of("tasks", List.of(Map.of("id", "t1", "title", "Build",
+                                "role", "BACKEND_DEVELOPER", "dependsOn", List.of()))),
+                        List.of(), Confidence.HIGH, List.of(), Optional.empty());
+            }
+        };
+        AgentFactory factory = new AgentFactory() {
+            @Override public Agent create(AgentRole role) { return tl; }
+            @Override public boolean supports(AgentRole role) { return role == AgentRole.TEAM_LEAD; }
+            @Override public Set<AgentRole> supportedRoles() { return Set.of(AgentRole.TEAM_LEAD); }
+        };
+
+        // Default request: rememberProject is off, so the brief must NOT be read or injected.
+        new TeamLeadProjectPlanner(factory, null, null, storeReturning("PRIOR-BRIEF")).plan("p1", request());
+
+        assertEquals(null, tlGrounding.get().get("projectKnowledge"),
+                "a one-shot run must not pay to read the brief");
+        assertEquals("false", tlGrounding.get().get("rememberProject"));
+    }
+
+    @Test
+    void curatorTaskIsStrippedUnlessRememberProjectIsOn() {
+        Map<String, Object> build = Map.of("id", "t1", "title", "Build",
+                "role", "BACKEND_DEVELOPER", "dependsOn", List.of());
+        Map<String, Object> curate = Map.of("id", "t2", "title", "Curate",
+                "role", "KNOWLEDGE_CURATOR", "dependsOn", List.of("t1"));
+        Agent.Response response = new Agent.Response(Agent.Outcome.COMPLETED,
+                Map.of("tasks", List.of(build, curate)), List.of(),
+                Agent.Confidence.HIGH, List.of(), Optional.empty());
+        AgentFactory factory = teamLeadReturning(response);
+
+        // Default (off): the curator the Team Lead added is removed.
+        TaskGraph offGraph = new TeamLeadProjectPlanner(factory).plan("p1", request());
+        assertEquals(1, offGraph.tasks().size());
+        assertTrue(offGraph.tasks().stream().noneMatch(t -> t.assignedRole() == AgentRole.KNOWLEDGE_CURATOR));
+
+        // Opted in: the curator is kept.
+        OrchestrationEngine.ProjectRequest remembered = new OrchestrationEngine.ProjectRequest(
+                "build a todo app", Map.of("rememberProject", true), Optional.empty());
+        TaskGraph onGraph = new TeamLeadProjectPlanner(factory).plan("p1", remembered);
+        assertTrue(onGraph.tasks().stream().anyMatch(t -> t.assignedRole() == AgentRole.KNOWLEDGE_CURATOR));
+    }
+
+    /** A knowledge store whose load() yields a fixed brief (the repo is never touched). */
+    private static com.orchestration.knowledge.ProjectKnowledgeStore storeReturning(String brief) {
+        com.orchestration.artifact.ArtifactRepository noRepo =
+                new com.orchestration.artifact.ArtifactRepository() {
+                    @Override public CommitId write(WriteRequest request) { return new CommitId("x"); }
+                    @Override public Optional<String> read(String path) { return Optional.empty(); }
+                    @Override public List<String> list(String pathPrefix) { return List.of(); }
+                };
+        return new com.orchestration.knowledge.ProjectKnowledgeStore(noRepo, true, ".project/knowledge.md") {
+            @Override public Optional<String> load() { return Optional.ofNullable(brief); }
+        };
+    }
+
+    @Test
     void fallsBackToASingleTeamLeadTaskWhenNoTasksReturned() {
         Agent.Response response = new Agent.Response(Agent.Outcome.INSUFFICIENT_INFORMATION,
                 Map.of(), List.of(), Agent.Confidence.LOW, List.of(), Optional.of("too vague"));

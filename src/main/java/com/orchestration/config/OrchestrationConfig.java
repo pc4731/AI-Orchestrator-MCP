@@ -29,6 +29,7 @@ import java.time.Duration;
         MessageBusProperties.class,
         SandboxProperties.class,
         WorkspaceProperties.class,
+        KnowledgeProperties.class,
         SkillsProperties.class
 })
 public class OrchestrationConfig {

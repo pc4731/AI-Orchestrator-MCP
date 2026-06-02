@@ -42,13 +42,23 @@ public class OrchestrationMcpService {
 
     /** Start a project from a feature request; returns once the first agent task is ready. */
     public Map<String, Object> start(String featureRequest) {
+        return start(featureRequest, false);
+    }
+
+    /**
+     * Start a project. {@code rememberProject} opts in to the persistent project brain (records and
+     * reads a committed knowledge brief) — only worth it for projects continued across sessions; it
+     * is off by default so one-shot runs pay nothing for it.
+     */
+    public Map<String, Object> start(String featureRequest, boolean rememberProject) {
         if (featureRequest == null || featureRequest.isBlank()) {
             return Map.of("error", "featureRequest is required");
         }
         bridge.armStart();
+        Map<String, Object> options = Map.of("rememberProject", rememberProject);
         Thread.ofVirtual().name("mcp-project").start(() -> {
             try {
-                engine.submit(new OrchestrationEngine.ProjectRequest(featureRequest, Map.of(), Optional.of(2_000_000L)));
+                engine.submit(new OrchestrationEngine.ProjectRequest(featureRequest, options, Optional.of(2_000_000L)));
             } catch (RuntimeException e) {
                 System.err.println("[mcp] project submit failed: " + e);
             }
