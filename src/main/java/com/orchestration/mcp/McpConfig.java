@@ -3,6 +3,7 @@ package com.orchestration.mcp;
 import com.orchestration.agent.AgentFactory;
 import com.orchestration.agent.SkillRegistry;
 import com.orchestration.config.AgentsProperties;
+import com.orchestration.engine.ClarificationGateway;
 import com.orchestration.engine.OrchestrationEngine;
 import com.orchestration.memory.MemoryStore;
 import com.orchestration.web.ActiveProject;
@@ -28,6 +29,16 @@ public class McpConfig {
     @Bean
     public AgentFactory agentFactory(AgentsProperties agents, McpBridge bridge, SkillRegistry skills) {
         return new McpAgentFactory(agents, bridge, skills);
+    }
+
+    /**
+     * Backs the planner's pre-build clarification loop with Claude Code as the human relay, so the
+     * Business Analyst can ask the real user questions and confirm its understanding before any code
+     * is written. Only the mcp profile defines this; other profiles run the planner without it.
+     */
+    @Bean
+    public ClarificationGateway clarificationGateway(McpBridge bridge) {
+        return new McpClarificationGateway(bridge);
     }
 
     @Bean

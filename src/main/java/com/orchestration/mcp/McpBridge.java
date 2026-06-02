@@ -21,6 +21,13 @@ import java.util.concurrent.TimeUnit;
  */
 public class McpBridge {
 
+    /**
+     * Who a parked task is addressed to. {@code AGENT} tasks are role-played by Claude Code; a
+     * {@code USER} task is a clarification/confirmation that Claude must relay to the real human and
+     * answer with the human's words — the mechanism behind the pre-build clarification loop.
+     */
+    public enum Audience { AGENT, USER }
+
     /** A task waiting for Claude Code to fulfil it. */
     public record PendingTask(
             String taskId,
@@ -31,10 +38,20 @@ public class McpBridge {
             String systemPrompt,
             String instructions,
             String responseSchema,
-            Map<String, String> grounding
+            Map<String, String> grounding,
+            Audience audience
     ) {
         public PendingTask {
             grounding = grounding == null ? Map.of() : Map.copyOf(grounding);
+            audience = audience == null ? Audience.AGENT : audience;
+        }
+
+        /** Backward-compatible: an agent-audience task (Claude role-plays it). */
+        public PendingTask(String taskId, String projectId, String role, String title,
+                           String description, String systemPrompt, String instructions,
+                           String responseSchema, Map<String, String> grounding) {
+            this(taskId, projectId, role, title, description, systemPrompt, instructions,
+                    responseSchema, grounding, Audience.AGENT);
         }
     }
 

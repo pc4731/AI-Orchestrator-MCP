@@ -14,6 +14,7 @@ import com.orchestration.budget.TokenBudgetManager;
 import com.orchestration.bus.InMemoryMessageBus;
 import com.orchestration.bus.MessageBus;
 import com.orchestration.engine.AgentTaskProcessor;
+import com.orchestration.engine.ClarificationGateway;
 import com.orchestration.engine.DefaultOrchestrationEngine;
 import com.orchestration.engine.OrchestrationEngine;
 import com.orchestration.engine.ProjectPlanner;
@@ -27,6 +28,7 @@ import com.orchestration.memory.SqliteMemoryStore;
 import com.orchestration.tools.DockerToolExecutor;
 import com.orchestration.tools.SandboxSettings;
 import com.orchestration.tools.ToolExecutor;
+import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.context.annotation.Profile;
@@ -112,8 +114,11 @@ public class InfrastructureConfig {
     }
 
     @Bean
-    public ProjectPlanner projectPlanner(AgentFactory agentFactory, AuditLog auditLog) {
-        return new TeamLeadProjectPlanner(agentFactory, auditLog);
+    public ProjectPlanner projectPlanner(AgentFactory agentFactory, AuditLog auditLog,
+                                         ObjectProvider<ClarificationGateway> clarificationGateway) {
+        // The gateway is only defined under the mcp profile (Claude Code relays to the human); when
+        // absent the planner runs its single-pass behaviour with no human in the loop.
+        return new TeamLeadProjectPlanner(agentFactory, auditLog, clarificationGateway.getIfAvailable());
     }
 
     @Bean

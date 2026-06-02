@@ -16,6 +16,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Optional;
 import java.util.UUID;
 
 /**
@@ -28,17 +29,30 @@ import java.util.UUID;
  */
 public class TeamLeadProjectPlanner implements ProjectPlanner {
 
+    /** Hard cap on clarification rounds so a never-satisfied loop can't run forever. */
+    private static final int MAX_CLARIFICATION_ROUNDS = 5;
+
     private final AgentFactory agentFactory;
     private final AuditLog auditLog; // optional; when present, planning steps stream to the UI
+    private final ClarificationGateway clarifier; // optional; when present, the BA loop asks the user
 
     public TeamLeadProjectPlanner(AgentFactory agentFactory) {
-        this(agentFactory, null);
+        this(agentFactory, null, null);
     }
 
     public TeamLeadProjectPlanner(AgentFactory agentFactory, AuditLog auditLog) {
+        this(agentFactory, auditLog, null);
+    }
+
+    public TeamLeadProjectPlanner(AgentFactory agentFactory, AuditLog auditLog,
+                                  ClarificationGateway clarifier) {
         this.agentFactory = Objects.requireNonNull(agentFactory, "agentFactory");
         this.auditLog = auditLog;
+        this.clarifier = clarifier;
     }
+
+    /** The result of the clarification loop: the agreed spec plus the accumulated Q&amp;A trail. */
+    private record Clarified(String specification, String clarifications) {}
 
     private void planAudit(String projectId, String actor, AuditLog.EventType type,
                            String summary, Map<String, Object> details) {
@@ -51,18 +65,24 @@ public class TeamLeadProjectPlanner implements ProjectPlanner {
 
     @Override
     public TaskGraph plan(String projectId, OrchestrationEngine.ProjectRequest request) {
-        // 1) Business Analyst elicits/clarifies requirements into a specification.
-        String specification = elicitSpecification(projectId, request);
+        // 1) Market Researcher studies comparable tools, their complaints, and recommends features —
+        //    up front, so the questions the BA asks the user are informed by what the market shows.
+        String marketResearch = researchMarket(projectId, request, "");
 
-        // 2) Market Researcher studies comparable tools, their complaints, and recommends features.
-        String marketResearch = researchMarket(projectId, request, specification);
+        // 2) Clarification loop: the BA drafts a spec, asks the user the open questions, folds the
+        //    answers back in, and repeats until the understanding is confirmed (or the cap is hit).
+        Clarified clarified = clarifyRequirements(projectId, request, marketResearch);
+        String specification = clarified.specification();
 
-        // 3) Team Lead decomposes the (clarified) request + spec + research into a task graph.
+        // 3) Team Lead decomposes the AGREED request + spec + research into a task graph.
         Agent teamLead = agentFactory.create(AgentRole.TEAM_LEAD);
         Task planningTask = newTask(TaskId.random(), "Plan project", request.featureRequest(), AgentRole.TEAM_LEAD);
         Map<String, String> grounding = new HashMap<>();
         if (!specification.isBlank()) {
             grounding.put("specification", specification);
+        }
+        if (!clarified.clarifications().isBlank()) {
+            grounding.put("clarifications", clarified.clarifications());
         }
         if (!marketResearch.isBlank()) {
             grounding.put("marketResearch", marketResearch);
@@ -119,34 +139,143 @@ public class TeamLeadProjectPlanner implements ProjectPlanner {
     }
 
     /**
-     * Run the Business Analyst to turn the raw request into a specification. Best-effort: if BA isn't
-     * configured or returns nothing usable, planning proceeds on the raw request.
+     * The clarification loop. The Business Analyst drafts a specification; if it has open questions
+     * (or returns INSUFFICIENT_INFORMATION) and a {@link ClarificationGateway} is wired, those
+     * questions go to the user, the answers are folded back in as grounding, and the BA runs again.
+     * Once the BA is confident, the refined understanding is shown to the user for confirmation;
+     * corrections feed another round. Loops until confirmed or {@link #MAX_CLARIFICATION_ROUNDS}.
+     *
+     * <p>Best-effort: if the BA isn't configured, or no gateway is present (plain tests / no human),
+     * it degrades to the old single forward pass on the raw request — no interaction.
      */
-    private String elicitSpecification(String projectId, OrchestrationEngine.ProjectRequest request) {
+    private Clarified clarifyRequirements(String projectId, OrchestrationEngine.ProjectRequest request,
+                                          String marketResearch) {
         if (!agentFactory.supports(AgentRole.BUSINESS_ANALYST)) {
-            return "";
+            return new Clarified("", "");
         }
+        StringBuilder trail = new StringBuilder(); // accumulated Q&A + corrections across rounds
+        String specification = "";
+        int maxRounds = clarifier == null ? 1 : MAX_CLARIFICATION_ROUNDS;
+
+        for (int round = 1; round <= maxRounds; round++) {
+            Agent.Response r = runBusinessAnalyst(projectId, request, marketResearch, trail.toString(), round);
+            specification = stringOutput(r, "specification");
+            List<String> questions = extractQuestions(r);
+            boolean needsAnswers = r.outcome() == Agent.Outcome.INSUFFICIENT_INFORMATION
+                    || !questions.isEmpty();
+
+            // Ask the user the open questions and loop with their answers.
+            if (clarifier != null && needsAnswers && !questions.isEmpty()) {
+                String context = specification.isBlank() ? request.featureRequest() : specification;
+                Optional<String> answers = safeAsk(projectId, questions, context);
+                if (answers.isEmpty()) {
+                    break; // no human available / declined: proceed with what we have
+                }
+                trail.append("Round ").append(round).append(" — questions:\n");
+                for (String q : questions) {
+                    trail.append("  • ").append(q).append('\n');
+                }
+                trail.append("User's answers: ").append(answers.get()).append("\n\n");
+                continue;
+            }
+
+            // BA is confident: confirm the understanding with the user before building.
+            if (clarifier != null && !specification.isBlank()) {
+                ClarificationGateway.Confirmation confirmation =
+                        safeConfirm(projectId, understanding(specification, marketResearch));
+                if (!confirmation.confirmed() && !confirmation.corrections().isBlank()) {
+                    trail.append("Round ").append(round).append(" — user corrections: ")
+                            .append(confirmation.corrections()).append("\n\n");
+                    continue; // refine the spec with the corrections
+                }
+            }
+            break; // confident and confirmed, or no gateway to ask
+        }
+        return new Clarified(specification, trail.toString().strip());
+    }
+
+    /** One Business Analyst pass, grounded with the market research and the running Q&amp;A trail. */
+    private Agent.Response runBusinessAnalyst(String projectId, OrchestrationEngine.ProjectRequest request,
+                                              String marketResearch, String trail, int round) {
+        Agent ba = agentFactory.create(AgentRole.BUSINESS_ANALYST);
+        Task baTask = newTask(TaskId.random(), "Clarify requirements",
+                request.featureRequest(), AgentRole.BUSINESS_ANALYST);
+        Map<String, String> grounding = new HashMap<>();
+        if (!marketResearch.isBlank()) {
+            grounding.put("marketResearch", marketResearch);
+        }
+        if (!trail.isBlank()) {
+            grounding.put("clarifications", trail);
+        }
+        planAudit(projectId, AgentRole.BUSINESS_ANALYST.name(), AuditLog.EventType.PROMPT,
+                "BUSINESS_ANALYST clarifying requirements (round " + round + ")",
+                Map.of("role", "BUSINESS_ANALYST", "collaborator", "user",
+                        "prompt", request.featureRequest()));
+        Agent.Response r = ba.handle(
+                new Agent.Request(baTask, request.featureRequest(), grounding, Map.of()),
+                new Agent.Context(projectId, baTask.id().value(), Map.of()));
+        String specText = stringOutput(r, "specification");
+        planAudit(projectId, AgentRole.BUSINESS_ANALYST.name(), AuditLog.EventType.RESPONSE,
+                specText.isBlank() ? "BUSINESS_ANALYST has open questions for the user"
+                        : "BUSINESS_ANALYST produced a specification",
+                Map.of("role", "BUSINESS_ANALYST", "detail",
+                        specText.isBlank() ? "(needs clarification)" : trim(specText)));
+        return r;
+    }
+
+    private Optional<String> safeAsk(String projectId, List<String> questions, String context) {
         try {
-            Agent ba = agentFactory.create(AgentRole.BUSINESS_ANALYST);
-            Task baTask = newTask(TaskId.random(), "Clarify requirements",
-                    request.featureRequest(), AgentRole.BUSINESS_ANALYST);
-            planAudit(projectId, AgentRole.BUSINESS_ANALYST.name(), AuditLog.EventType.PROMPT,
-                    "BUSINESS_ANALYST eliciting requirements",
-                    Map.of("role", "BUSINESS_ANALYST", "collaborator", "user",
-                            "prompt", request.featureRequest()));
-            Agent.Response r = ba.handle(
-                    new Agent.Request(baTask, request.featureRequest(), Map.of(), Map.of()),
-                    new Agent.Context(projectId, baTask.id().value(), Map.of()));
-            Object spec = r.structuredOutput().get("specification");
-            String specText = spec != null ? spec.toString() : "";
-            planAudit(projectId, AgentRole.BUSINESS_ANALYST.name(), AuditLog.EventType.RESPONSE,
-                    "BUSINESS_ANALYST produced a specification",
-                    Map.of("role", "BUSINESS_ANALYST", "detail",
-                            specText.isBlank() ? "(needs clarification)" : trim(specText)));
-            return specText;
+            return clarifier.ask(projectId, questions, context);
         } catch (RuntimeException e) {
-            return ""; // never let requirements-gathering crash planning
+            return Optional.empty(); // never let a clarification round crash planning
         }
+    }
+
+    private ClarificationGateway.Confirmation safeConfirm(String projectId, String understanding) {
+        try {
+            return clarifier.confirm(projectId, understanding);
+        } catch (RuntimeException e) {
+            return ClarificationGateway.Confirmation.approved();
+        }
+    }
+
+    /** A human-readable summary of what will be built, shown to the user at the confirmation step. */
+    private static String understanding(String specification, String marketResearch) {
+        StringBuilder sb = new StringBuilder("Here is my understanding of what you want built:\n\n");
+        sb.append(specification);
+        if (!marketResearch.isBlank()) {
+            sb.append("\n\nInformed by market research:\n").append(trim(marketResearch));
+        }
+        return sb.toString();
+    }
+
+    /** Pull the BA's open questions from {@code output.questions} (strings or {question:...} objects). */
+    private List<String> extractQuestions(Agent.Response response) {
+        Object q = response.structuredOutput().get("questions");
+        List<String> questions = new ArrayList<>();
+        if (q instanceof List<?> list) {
+            for (Object item : list) {
+                if (item instanceof Map<?, ?> map) {
+                    Object text = map.get("question");
+                    if (text == null) {
+                        text = map.values().stream().findFirst().orElse(null);
+                    }
+                    if (text != null && !text.toString().isBlank()) {
+                        questions.add(text.toString());
+                    }
+                } else if (item != null && !item.toString().isBlank()) {
+                    questions.add(item.toString());
+                }
+            }
+        } else if (q != null && !q.toString().isBlank()) {
+            questions.add(q.toString());
+        }
+        return questions;
+    }
+
+    private static String stringOutput(Agent.Response response, String key) {
+        Object v = response.structuredOutput().get(key);
+        return v == null ? "" : v.toString();
     }
 
     /**

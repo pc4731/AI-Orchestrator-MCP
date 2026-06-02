@@ -70,9 +70,12 @@ public class OrchestrationMcpService {
                 "nextAction", "CALL_NEXT",
                 "message", "Project started. Run the loop AUTONOMOUSLY: call orchestrate_next, act as "
                         + "the agent it returns, call orchestrate_submit, and repeat until nextAction is "
-                        + "STOP. EXCEPTION: if an agent — especially the Team Lead — returns clarifying "
-                        + "questions (status INSUFFICIENT_INFORMATION with output.questions), ASK the "
-                        + "user those questions, incorporate the answers, and then continue the loop.");
+                        + "STOP. CRITICAL EXCEPTION: when orchestrate_next returns nextAction ASK_USER "
+                        + "(a userQuery), STOP automating and relay its questionsForUser to the user "
+                        + "verbatim; submit ONLY the user's real answer. Early on the team will research, "
+                        + "then ask you clarifying questions and ask you to confirm its understanding "
+                        + "before writing any code — carry those to the user and back faithfully so the "
+                        + "build matches what they actually want.");
     }
 
     /** Return the next agent task to fulfil, or the project status if none is pending. */
@@ -80,6 +83,9 @@ public class OrchestrationMcpService {
         Optional<McpBridge.PendingTask> pending = bridge.poll(POLL_MILLIS);
         if (pending.isPresent()) {
             McpBridge.PendingTask t = pending.get();
+            if (t.audience() == McpBridge.Audience.USER) {
+                return userQuery(t);
+            }
             Map<String, Object> task = new LinkedHashMap<>();
             task.put("taskId", t.taskId());
             task.put("role", t.role());
@@ -114,6 +120,30 @@ public class OrchestrationMcpService {
         // Not finished but nothing ready this instant (a task is running): tell the client to retry.
         return Map.of("status", state, "nextAction", "CALL_NEXT",
                 "message", "No task ready this moment; call orchestrate_next again to continue the loop.");
+    }
+
+    /**
+     * A USER-audience task: the clarification loop is asking the real human something. Claude must
+     * NOT answer it as an agent — it must relay it to the user and submit the user's own words.
+     */
+    private Map<String, Object> userQuery(McpBridge.PendingTask t) {
+        Map<String, Object> query = new LinkedHashMap<>();
+        query.put("taskId", t.taskId());
+        query.put("forUser", true);
+        query.put("title", t.title());
+        query.put("questionsForUser", t.description());
+        query.put("responseSchema", t.responseSchema());
+
+        Map<String, Object> response = new LinkedHashMap<>();
+        response.put("userQuery", query);
+        response.put("nextAction", "ASK_USER");
+        response.put("message", "PAUSE the autonomous loop. This must be answered by the HUMAN, not "
+                + "by you. Show the text in questionsForUser to the user verbatim, wait for their "
+                + "actual reply, then call orchestrate_submit with this taskId and an output matching "
+                + "responseSchema (the user's own words). Do NOT guess, assume, or answer on their "
+                + "behalf — the whole point is to match the user's real intent before any code is "
+                + "written. After submitting, resume calling orchestrate_next.");
+        return response;
     }
 
     /** Deliver an agent's result for a task and advance the workflow. */
