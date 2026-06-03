@@ -112,9 +112,6 @@ public class AgentTaskProcessor implements TaskProcessor {
     public Agent.Response process(String projectId, Task task) {
         Agent agent = agentFactory.create(task.assignedRole());
 
-        // Prompt Engineer pre-step: refine the task prompt for worker roles.
-        String refinedPrompt = refinePrompt(projectId, task);
-
         Map<String, Object> baseParams = new LinkedHashMap<>();
         baseParams.put("workingDir", workingDir);
         baseParams.put("testCommand", defaultTestCommand);
@@ -122,6 +119,10 @@ public class AgentTaskProcessor implements TaskProcessor {
 
         // Collaboration: gather the outputs of this task's completed dependencies as grounding.
         Map<String, String> upstream = upstreamHandoffs(projectId, task);
+
+        // Prompt Engineer pre-step — only for worker roles whose task is under-specified, and given
+        // the upstream artifacts so it sharpens with real context instead of paraphrasing blind.
+        String refinedPrompt = refinePrompt(projectId, task, upstream);
 
         Agent.Response response = runTask(projectId, task, agent, refinedPrompt, baseParams, upstream);
 
@@ -388,13 +389,15 @@ public class AgentTaskProcessor implements TaskProcessor {
         if (response == null) {
             return;
         }
+        // Pass the FULL upstream output downstream (capped only to avoid pathological sizes), not a
+        // 280-char stub — later agents need the real architecture/schema/instructions, not a teaser.
         String summary = response.escalationReason().isPresent()
-                ? "" : summarize(response.structuredOutput());
+                ? "" : handoffText(String.valueOf(response.structuredOutput()));
         // Prefer concrete instructions/spec/tokens fields if the agent produced them.
         for (String key : List.of("instructions", "specification", "tokens", "schema", "summary")) {
             Object v = response.structuredOutput().get(key);
             if (v != null && !v.toString().isBlank()) {
-                summary = summarizeText(v.toString());
+                summary = handoffText(v.toString());
                 break;
             }
         }
@@ -430,10 +433,30 @@ public class AgentTaskProcessor implements TaskProcessor {
         }
     }
 
-    /** Run the Prompt Engineer to sharpen the prompt for worker roles; empty for non-worker roles
-     *  or when PROMPT_ENGINEER is not configured. Best-effort — never fails the task. */
-    private String refinePrompt(String projectId, Task task) {
-        if (!needsRefinement(task.assignedRole()) || !agentFactory.supports(AgentRole.PROMPT_ENGINEER)) {
+    /** Cap on hand-off / grounding text passed between agents — generous (keeps full specs/schemas)
+     *  but bounded so a runaway output can't bloat every downstream prompt. */
+    private static final int HANDOFF_MAX_CHARS = 12_000;
+
+    /** Full text for downstream grounding, stripped and capped only against pathological sizes. */
+    private static String handoffText(String text) {
+        if (text == null) {
+            return "";
+        }
+        String t = text.strip();
+        return t.length() <= HANDOFF_MAX_CHARS ? t
+                : t.substring(0, HANDOFF_MAX_CHARS) + "\n…[truncated]";
+    }
+
+    /**
+     * Run the Prompt Engineer to sharpen the prompt — but only when it pays. It is skipped for
+     * meta-roles, when PROMPT_ENGINEER isn't configured, and (the new gate) when the task is already
+     * well-specified, since the PE then just paraphrases and doubles the step count. When it does
+     * run, it gets the upstream artifacts as grounding so it sharpens with real context.
+     * Best-effort — never fails the task.
+     */
+    private String refinePrompt(String projectId, Task task, Map<String, String> upstream) {
+        if (!needsRefinement(task.assignedRole()) || !agentFactory.supports(AgentRole.PROMPT_ENGINEER)
+                || isWellSpecified(task)) {
             return "";
         }
         try {
@@ -445,7 +468,9 @@ public class AgentTaskProcessor implements TaskProcessor {
                     AuditLog.EventType.PROMPT, "PROMPT_ENGINEER refining prompt for " + task.assignedRole(),
                     Map.of("role", "PROMPT_ENGINEER", "collaborator", task.assignedRole().name(),
                             "prompt", ask), Instant.now()));
-            Agent.Request request = new Agent.Request(task, ask, Map.of(), Map.of());
+            // Give the PE the same upstream context the worker will get, so it references real
+            // artifacts (schema, API contract) instead of reconstructing them from memory.
+            Agent.Request request = new Agent.Request(task, ask, upstream, Map.of());
             Agent.Response r = pe.handle(request, new Agent.Context(projectId, task.id().value(), Map.of()));
             Object refined = r.structuredOutput().get("refinedPrompt");
             String refinedText = refined != null ? refined.toString() : "";
@@ -468,6 +493,23 @@ public class AgentTaskProcessor implements TaskProcessor {
                  KNOWLEDGE_CURATOR, PROJECT_EXPLAINER, RETROSPECTIVE_ANALYST -> false;
             default -> true;
         };
+    }
+
+    /**
+     * Whether a task is already detailed enough that the Prompt Engineer would only paraphrase it.
+     * Heuristic (from real run feedback): a long description, or one that already spells out
+     * acceptance criteria / numbered deliverables / explicit file paths, is left as-is.
+     */
+    private static boolean isWellSpecified(Task task) {
+        String d = task.description();
+        if (d == null) {
+            return false;
+        }
+        String lower = d.toLowerCase();
+        int words = d.trim().isEmpty() ? 0 : d.trim().split("\\s+").length;
+        boolean hasCriteria = lower.contains("acceptance criteria") || lower.contains("deliverable")
+                || lower.matches("(?s).*(^|\\n)\\s*\\d+[.)].*");        // a numbered list
+        return words >= 120 || (words >= 60 && hasCriteria);
     }
 
     private void commitArtifacts(Task task, Agent agent, Agent.Response response, int attempt) {

@@ -274,7 +274,11 @@ public class OrchestrationMcpService {
         }
         boolean accepted = bridge.complete(taskId, response);
         if (!accepted) {
-            return Map.of("accepted", false, "error", "unknown or already-completed taskId: " + taskId);
+            // Most often a benign race: a USER question was already answered in the dashboard. Return
+            // a structured signal (not an error) so the loop just continues instead of assuming failure.
+            return Map.of("accepted", false, "outcome", "ALREADY_COMPLETED", "nextAction", "CALL_NEXT",
+                    "message", "That task was already completed (e.g. the user answered in the "
+                            + "dashboard). Nothing to do — call orchestrate_next to continue.");
         }
         String state = currentState();
         boolean finished = "DONE".equals(state) || "FAILED".equals(state);

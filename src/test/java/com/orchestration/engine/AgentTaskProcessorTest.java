@@ -400,6 +400,125 @@ class AgentTaskProcessorTest {
                 "completing a project must evict its hand-offs");
     }
 
+    /** A developer that captures its request, and a Prompt Engineer that counts how often it ran. */
+    private static AgentFactory peAndDeveloper(java.util.concurrent.atomic.AtomicInteger peCalls,
+                                               AtomicReference<Agent.Request> devRequest) {
+        Agent pe = new Agent() {
+            @Override public AgentId id() { return new AgentId("pe"); }
+            @Override public AgentRole role() { return AgentRole.PROMPT_ENGINEER; }
+            @Override public Set<Capability> capabilities() { return Set.of(Capability.REFINE_PROMPT); }
+            @Override public boolean canHandle(Task task) { return true; }
+            @Override public Response handle(Request request, Context context) {
+                peCalls.incrementAndGet();
+                return new Response(Outcome.COMPLETED, Map.of("refinedPrompt", "REFINED"),
+                        List.of(), Confidence.HIGH, List.of(), Optional.empty());
+            }
+        };
+        Agent dev = new Agent() {
+            @Override public AgentId id() { return new AgentId("dev"); }
+            @Override public AgentRole role() { return AgentRole.BACKEND_DEVELOPER; }
+            @Override public Set<Capability> capabilities() { return Set.of(Capability.WRITE_CODE); }
+            @Override public boolean canHandle(Task task) { return true; }
+            @Override public Response handle(Request request, Context context) {
+                devRequest.set(request);
+                return new Response(Outcome.COMPLETED, Map.of("summary", "built"),
+                        List.of(), Confidence.HIGH, List.of(), Optional.empty());
+            }
+        };
+        return new AgentFactory() {
+            @Override public Agent create(AgentRole role) { return role == AgentRole.PROMPT_ENGINEER ? pe : dev; }
+            @Override public boolean supports(AgentRole role) {
+                return role == AgentRole.PROMPT_ENGINEER || role == AgentRole.BACKEND_DEVELOPER;
+            }
+            @Override public Set<AgentRole> supportedRoles() {
+                return Set.of(AgentRole.PROMPT_ENGINEER, AgentRole.BACKEND_DEVELOPER);
+            }
+        };
+    }
+
+    private Task devTask(String description) {
+        return new Task(new TaskId("t1"), "Build", description, AgentRole.BACKEND_DEVELOPER,
+                WorkflowState.PENDING, List.of(), Map.of(), Instant.now(), Instant.now());
+    }
+
+    @Test
+    void promptEngineerRunsForUnderSpecifiedTasksAndItsRefinementReachesTheWorker() {
+        var peCalls = new java.util.concurrent.atomic.AtomicInteger();
+        AtomicReference<Agent.Request> devReq = new AtomicReference<>();
+        AgentTaskProcessor processor = new AgentTaskProcessor(
+                peAndDeveloper(peCalls, devReq), new JGitArtifactRepository(repoDir), new InMemoryAuditLog());
+
+        processor.process("p1", devTask("build it")); // terse, under-specified
+
+        assertEquals(1, peCalls.get(), "PE should run for a vague task");
+        assertEquals("REFINED", devReq.get().inputArtifacts().get("refinedPrompt"));
+    }
+
+    @Test
+    void promptEngineerIsSkippedForWellSpecifiedTasks() {
+        var peCalls = new java.util.concurrent.atomic.AtomicInteger();
+        AtomicReference<Agent.Request> devReq = new AtomicReference<>();
+        AgentTaskProcessor processor = new AgentTaskProcessor(
+                peAndDeveloper(peCalls, devReq), new JGitArtifactRepository(repoDir), new InMemoryAuditLog());
+
+        String detailed = ("word ".repeat(130)).trim(); // long, self-contained description
+        processor.process("p1", devTask(detailed));
+
+        assertEquals(0, peCalls.get(), "PE should be skipped when the task is already well-specified");
+        assertNull(devReq.get().inputArtifacts().get("refinedPrompt"), "no refined prompt was added");
+    }
+
+    @Test
+    void handoffPassesFullUpstreamContentNotA280CharStub() {
+        String longSpec = "S".repeat(600); // far longer than the old 280-char cap
+        Agent architect = new Agent() {
+            @Override public AgentId id() { return new AgentId("arch"); }
+            @Override public AgentRole role() { return AgentRole.BACKEND_ARCHITECT; }
+            @Override public Set<Capability> capabilities() { return Set.of(Capability.DESIGN_ARCHITECTURE); }
+            @Override public boolean canHandle(Task task) { return true; }
+            @Override public Response handle(Request request, Context context) {
+                return new Response(Outcome.COMPLETED, Map.of("instructions", longSpec),
+                        List.of(), Confidence.HIGH, List.of(), Optional.empty());
+            }
+        };
+        AtomicReference<Agent.Request> devReq = new AtomicReference<>();
+        Agent dev = new Agent() {
+            @Override public AgentId id() { return new AgentId("dev"); }
+            @Override public AgentRole role() { return AgentRole.BACKEND_DEVELOPER; }
+            @Override public Set<Capability> capabilities() { return Set.of(Capability.WRITE_CODE); }
+            @Override public boolean canHandle(Task task) { return true; }
+            @Override public Response handle(Request request, Context context) {
+                devReq.set(request);
+                return new Response(Outcome.COMPLETED, Map.of("summary", "built"),
+                        List.of(), Confidence.HIGH, List.of(), Optional.empty());
+            }
+        };
+        AgentFactory factory = new AgentFactory() {
+            @Override public Agent create(AgentRole role) {
+                return role == AgentRole.BACKEND_ARCHITECT ? architect : dev;
+            }
+            @Override public boolean supports(AgentRole role) {
+                return role == AgentRole.BACKEND_ARCHITECT || role == AgentRole.BACKEND_DEVELOPER;
+            }
+            @Override public Set<AgentRole> supportedRoles() {
+                return Set.of(AgentRole.BACKEND_ARCHITECT, AgentRole.BACKEND_DEVELOPER);
+            }
+        };
+        AgentTaskProcessor processor = new AgentTaskProcessor(
+                factory, new JGitArtifactRepository(repoDir), new InMemoryAuditLog(),
+                ".", List.of("./gradlew", "test"), 0);
+
+        TaskId archId = new TaskId("arch-1");
+        processor.process("p1", new Task(archId, "Design", "design it", AgentRole.BACKEND_ARCHITECT,
+                WorkflowState.PENDING, List.of(), Map.of(), Instant.now(), Instant.now()));
+        processor.process("p1", new Task(new TaskId("dev-1"), "Build", "build it",
+                AgentRole.BACKEND_DEVELOPER, WorkflowState.PENDING, List.of(archId), Map.of(),
+                Instant.now(), Instant.now()));
+
+        assertEquals(longSpec, devReq.get().inputArtifacts().get("from_BACKEND_ARCHITECT"),
+                "the full upstream output must reach the downstream agent, not a truncated stub");
+    }
+
     @Test
     void qaFailureRedispatchesDeveloperToFixThenPasses() {
         // QA fails the build once, a developer is re-dispatched to fix it, then QA passes.

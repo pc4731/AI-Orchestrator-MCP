@@ -78,6 +78,9 @@
   .ask .mic { background:#1c2444; color:var(--txt); border:1px solid var(--line); }
   .ask .mic.live { background:#5b1717; color:#fca5a5; border-color:#7a2020; animation:pulse 1.2s infinite; }
   .ask .spk { color:var(--muted); font-size:12px; margin-left:auto; }
+  .convoNote { margin:8px 22px 0; padding:10px 14px; border-radius:8px; background:#0c4a2b; color:#86efac;
+               border:1px solid #1c7a47; font-size:13px; }
+  .convoNote.hidden { display:none; }
 </style>
 </head>
 <body>
@@ -110,6 +113,8 @@
       <span class="spk" id="spk"></span>
     </div>
   </div>
+
+  <div class="convoNote hidden" id="convoNote"></div>
 
   <div class="grid">
     <div class="col">
@@ -268,10 +273,33 @@ function esc(s) { return String(s).replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt
 // Conversation + voice: the team asks the user questions; the user answers here
 // by typing or speaking. Voice uses the browser's built-in Web Speech API.
 // ---------------------------------------------------------------------------
-let voiceOn = true, recognition = null, listening = false;
+let voiceOn = true, recognition = null, listening = false, chosenVoice = null;
 let currentQuestionId = null, spokenId = null, answering = false;
 
+// Pick the most natural-sounding English voice the browser offers, instead of the default (which is
+// often the robotic eSpeak fallback). Prefer modern neural/online voices by name.
+function pickVoice() {
+  const voices = (window.speechSynthesis && window.speechSynthesis.getVoices()) || [];
+  if (!voices.length) return;
+  const en = voices.filter(v => /^en(-|_|$)/i.test(v.lang));
+  const pool = en.length ? en : voices;
+  const prefer = [
+    /natural/i, /neural/i, /\bgoogle\b/i,                 // Edge/Chrome neural, Google voices
+    /samantha|aaron|allison|ava|evan/i,                    // good macOS voices
+    /microsoft.*(online|aria|jenny|guy|libby)/i            // Windows online voices
+  ];
+  for (const re of prefer) {
+    const hit = pool.find(v => re.test(v.name) && !/compact|espeak/i.test(v.name));
+    if (hit) { chosenVoice = hit; return; }
+  }
+  chosenVoice = pool.find(v => v.default) || pool.find(v => !/compact|espeak/i.test(v.name)) || pool[0];
+}
+
 function setupVoice() {
+  if (window.speechSynthesis) {
+    pickVoice();
+    window.speechSynthesis.onvoiceschanged = pickVoice; // voices often load async
+  }
   $('voiceToggle').addEventListener('click', () => {
     voiceOn = !voiceOn;
     $('voiceToggle').className = voiceOn ? 'on' : '';
@@ -317,7 +345,8 @@ function speak(text) {
   if (!voiceOn || !window.speechSynthesis) return;
   window.speechSynthesis.cancel();
   const u = new SpeechSynthesisUtterance(text);
-  u.lang = 'en-US';
+  if (chosenVoice) { u.voice = chosenVoice; u.lang = chosenVoice.lang; } else { u.lang = 'en-US'; }
+  u.rate = 1.0; u.pitch = 1.0; u.volume = 1.0;   // natural cadence, not the chipmunk/robot default
   window.speechSynthesis.speak(u);
 }
 
@@ -365,16 +394,27 @@ async function sendAnswer(approve, ignoreText) {
   if (window.speechSynthesis) window.speechSynthesis.cancel();
   const id = currentQuestionId;
   try {
-    await fetch('/api/questions/' + encodeURIComponent(id) + '/answer', {
+    const res = await fetch('/api/questions/' + encodeURIComponent(id) + '/answer', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ text, approve })
     });
+    let msg = 'Answer sent — the team is continuing.';
+    try { const d = await res.json(); if (d && d.message) msg = d.message; } catch (e) {}
     $('ask').className = 'ask hidden';
     currentQuestionId = null;
+    showNote('✓ ' + msg);
   } catch (e) {
     answering = false;
     $('spk').textContent = 'Could not send — try again.';
   }
+}
+
+function showNote(text) {
+  const n = $('convoNote');
+  n.textContent = text;
+  n.className = 'convoNote';
+  clearTimeout(showNote._t);
+  showNote._t = setTimeout(() => { n.className = 'convoNote hidden'; }, 4000);
 }
 
 init();
