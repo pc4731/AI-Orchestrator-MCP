@@ -6,17 +6,21 @@ import com.orchestration.memory.MemoryStore;
 import com.orchestration.task.GraphSnapshot;
 import org.springframework.core.env.Environment;
 import org.springframework.core.env.Profiles;
+import org.springframework.http.HttpStatus;
+import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
+import org.springframework.web.bind.annotation.ResponseStatus;
 import org.springframework.web.bind.annotation.RestController;
 import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 
 import java.io.IOException;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -83,12 +87,20 @@ public class ProjectController {
     public Map<String, Object> status(@PathVariable String id) {
         OrchestrationEngine.ProjectStatus status = engine.status(id);
         return Map.of(
-                "projectId", status.projectId(),
+                "projectId", safe(status.projectId()),
                 "state", status.state().name(),
                 "totalTasks", status.totalTasks(),
                 "completedTasks", status.completedTasks(),
+                // A gate's prompt can be null while it is still being populated; Map.of rejects nulls
+                // (→ NPE → 500), so build a null-tolerant map and default the prompt.
                 "pendingGates", status.pendingGates().stream()
-                        .map(g -> Map.of("gateId", g.gateId(), "type", g.type().name(), "prompt", g.prompt()))
+                        .map(g -> {
+                            Map<String, Object> gate = new LinkedHashMap<>();
+                            gate.put("gateId", safe(g.gateId()));
+                            gate.put("type", g.type() == null ? "" : g.type().name());
+                            gate.put("prompt", safe(g.prompt()));
+                            return gate;
+                        })
                         .toList());
     }
 
@@ -98,12 +110,15 @@ public class ProjectController {
         memoryStore.latestCheckpoint(id).ifPresent(checkpoint -> {
             GraphSnapshot snapshot = GraphSnapshot.fromBytes(checkpoint.state());
             for (GraphSnapshot.TaskNode node : snapshot.nodes()) {
-                nodes.add(Map.of(
-                        "id", node.id(),
-                        "title", node.title(),
-                        "role", node.assignedRole() == null ? "" : node.assignedRole(),
-                        "state", node.state(),
-                        "dependsOn", node.dependsOn()));
+                // Only dependsOn is guaranteed non-null by TaskNode; id/title/state can be null on a
+                // half-populated node mid-run. Map.of rejects nulls (→ NPE → 500), so default them all.
+                Map<String, Object> n = new LinkedHashMap<>();
+                n.put("id", safe(node.id()));
+                n.put("title", safe(node.title()));
+                n.put("role", safe(node.assignedRole()));
+                n.put("state", safe(node.state()));
+                n.put("dependsOn", node.dependsOn());
+                nodes.add(n);
             }
         });
         return Map.of("nodes", nodes);
@@ -141,5 +156,18 @@ public class ProjectController {
         });
         emitter.onError(e -> unsubscribe.run());
         return emitter;
+    }
+
+    /** An unknown project/gate id is a "not found", not a server fault: the engine signals it with
+     *  IllegalArgumentException, which would otherwise surface as a confusing HTTP 500. */
+    @ExceptionHandler(IllegalArgumentException.class)
+    @ResponseStatus(HttpStatus.NOT_FOUND)
+    public Map<String, Object> handleUnknown(IllegalArgumentException e) {
+        return Map.of("error", e.getMessage() == null ? "Not found" : e.getMessage());
+    }
+
+    /** Null-safe string for response maps — {@link Map#of} rejects null values with an NPE. */
+    private static String safe(String s) {
+        return s == null ? "" : s;
     }
 }

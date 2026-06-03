@@ -549,11 +549,11 @@ public class AgentTaskProcessor implements TaskProcessor {
     }
 
     /**
-     * Run the Prompt Engineer to sharpen the prompt — but only when it pays. It is skipped for
-     * meta-roles, when PROMPT_ENGINEER isn't configured, and (the new gate) when the task is already
-     * well-specified, since the PE then just paraphrases and doubles the step count. When it does
-     * run, it gets the upstream artifacts as grounding so it sharpens with real context.
-     * Best-effort — never fails the task.
+     * Run the Prompt Engineer to sharpen the prompt — but only when it pays. It is skipped for every
+     * role except the code-writing developers (see {@link #needsRefinement}), when PROMPT_ENGINEER
+     * isn't configured, and when the task is already well-specified, since the PE then just paraphrases
+     * and doubles the step count. When it does run, it gets the upstream artifacts as grounding so it
+     * sharpens with real context. Best-effort — never fails the task.
      */
     private String refinePrompt(String projectId, Task task, Map<String, String> upstream) {
         if (!needsRefinement(task.assignedRole()) || !agentFactory.supports(AgentRole.PROMPT_ENGINEER)
@@ -578,8 +578,10 @@ public class AgentTaskProcessor implements TaskProcessor {
             auditLog.record(new AuditLog.AuditEvent(
                     UUID.randomUUID().toString(), projectId, task.id().value(), pe.id().value(),
                     AuditLog.EventType.RESPONSE, "PROMPT_ENGINEER produced a refined prompt",
+                    // Show the refined prompt at full length (capped only against pathological sizes),
+                    // not the 280-char summary — otherwise the UI looks like the PE is clipping it.
                     Map.of("role", "PROMPT_ENGINEER", "detail",
-                            refinedText.isBlank() ? "(no refinement)" : summarizeText(refinedText)),
+                            refinedText.isBlank() ? "(no refinement)" : handoffText(refinedText)),
                     Instant.now()));
             return refinedText;
         } catch (RuntimeException e) {
@@ -588,11 +590,15 @@ public class AgentTaskProcessor implements TaskProcessor {
     }
 
     private boolean needsRefinement(AgentRole role) {
+        // Only the code-writing roles benefit from refinement: the PE adds checkable acceptance
+        // criteria and the "produce REAL code, never a stub/placeholder/screenshot" guardrail, which
+        // measurably changes what a developer emits. Architects, the DBA, designers and writers get a
+        // planner spec that is already detailed enough that the PE would only paraphrase it — so we
+        // skip them and save the extra LLM round-trip. (The PE can never remove detail: the worker
+        // always receives the full task description; the refined prompt is purely additive grounding.)
         return switch (role) {
-            // don't refine the meta-roles (planning/research/QA/knowledge/explanation/retrospective)
-            case PROMPT_ENGINEER, BUSINESS_ANALYST, MARKET_RESEARCHER, TEAM_LEAD, QA_ENGINEER,
-                 KNOWLEDGE_CURATOR, PROJECT_EXPLAINER, RETROSPECTIVE_ANALYST -> false;
-            default -> true;
+            case BACKEND_DEVELOPER, FRONTEND_DEVELOPER, AI_ML_DEVELOPER -> true;
+            default -> false;
         };
     }
 
@@ -610,7 +616,7 @@ public class AgentTaskProcessor implements TaskProcessor {
         int words = d.trim().isEmpty() ? 0 : d.trim().split("\\s+").length;
         boolean hasCriteria = lower.contains("acceptance criteria") || lower.contains("deliverable")
                 || lower.matches("(?s).*(^|\\n)\\s*\\d+[.)].*");        // a numbered list
-        return words >= 120 || (words >= 60 && hasCriteria);
+        return words >= 80 || (words >= 50 && hasCriteria);
     }
 
     private void commitArtifacts(Task task, Agent agent, Agent.Response response, int attempt) {

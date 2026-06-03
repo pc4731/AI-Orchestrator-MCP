@@ -15,13 +15,15 @@ import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.concurrent.ThreadLocalRandom;
 import java.util.stream.Stream;
 
 /**
  * Thin Anthropic Claude client built on {@code java.net.http} (no third-party SDK).
  *
  * <p>Responsibilities hidden from agents: building the Messages API request (including
- * Anthropic prompt caching of the system prompt), retry with exponential backoff on 429/5xx,
+ * Anthropic prompt caching of the system prompt), retry on 429/5xx honouring the server's
+ * Retry-After hint and otherwise using jittered exponential backoff,
  * token accounting, and Server-Sent-Events streaming. The HTTP calls go through the
  * {@link HttpTransport}/{@link StreamingTransport} seams so the client is fully unit-testable
  * without network access or an API key.
@@ -50,7 +52,11 @@ public class AnthropicLlmClient implements LlmClient {
         HttpTransport transport = (url, headers, body) -> {
             HttpResponse<String> response = http.send(buildHttpRequest(url, headers, body, config),
                     HttpResponse.BodyHandlers.ofString());
-            return new HttpResult(response.statusCode(), response.body(), Map.of());
+            // Capture Retry-After so the retry loop can honour the server's own back-off hint on 429/529.
+            Map<String, String> responseHeaders = response.headers().firstValue("retry-after")
+                    .map(v -> Map.of("retry-after", v))
+                    .orElseGet(Map::of);
+            return new HttpResult(response.statusCode(), response.body(), responseHeaders);
         };
         StreamingTransport streaming = (url, headers, body) ->
                 http.send(buildHttpRequest(url, headers, body, config), HttpResponse.BodyHandlers.ofLines()).body();
@@ -253,7 +259,7 @@ public class AnthropicLlmClient implements LlmClient {
                     return result;
                 }
                 if (isRetryable(result.statusCode()) && attempt < maxRetries) {
-                    sleepBackoff(attempt);
+                    sleepBackoff(attempt, result);
                     continue;
                 }
                 throw new LlmClientException(
@@ -261,7 +267,7 @@ public class AnthropicLlmClient implements LlmClient {
             } catch (IOException e) {
                 lastFailure = new LlmClientException("HTTP transport error", e);
                 if (attempt < maxRetries) {
-                    sleepBackoff(attempt);
+                    sleepBackoff(attempt, null);
                     continue;
                 }
                 throw lastFailure;
@@ -277,14 +283,43 @@ public class AnthropicLlmClient implements LlmClient {
         return statusCode == 429 || statusCode >= 500;
     }
 
-    private void sleepBackoff(int attempt) {
-        long backoff = Math.min(config.maxBackoffMillis(),
-                (long) (config.initialBackoffMillis() * Math.pow(config.multiplier(), attempt)));
+    /** Wait before a retry: honour the server's Retry-After hint when present, otherwise use jittered
+     *  exponential backoff. {@code result} may be null (transport-level I/O error, no response). */
+    private void sleepBackoff(int attempt, HttpResult result) {
+        long backoff = retryAfterMillis(result).orElseGet(() -> exponentialBackoff(attempt));
         try {
             Thread.sleep(backoff);
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
             throw new LlmClientException("Interrupted during backoff", e);
+        }
+    }
+
+    /** Full-jitter exponential backoff: a random wait in [base/2, base] so many agents retrying after
+     *  the same 429 don't reconverge into a synchronized thundering herd. */
+    private long exponentialBackoff(int attempt) {
+        long base = Math.min(config.maxBackoffMillis(),
+                (long) (config.initialBackoffMillis() * Math.pow(config.multiplier(), attempt)));
+        long half = base / 2;
+        return half + ThreadLocalRandom.current().nextLong(half + 1);
+    }
+
+    /** Parse the Retry-After header (delta-seconds form, which Anthropic uses) into millis, bounded by
+     *  the configured max backoff so a bad header can't park a worker indefinitely. HTTP-date form is
+     *  not honoured — we fall back to exponential backoff for it. */
+    private Optional<Long> retryAfterMillis(HttpResult result) {
+        if (result == null) {
+            return Optional.empty();
+        }
+        String header = result.headers().get("retry-after");
+        if (header == null || header.isBlank()) {
+            return Optional.empty();
+        }
+        try {
+            long seconds = Long.parseLong(header.trim());
+            return Optional.of(Math.min(config.maxBackoffMillis(), Math.max(0L, seconds) * 1000L));
+        } catch (NumberFormatException e) {
+            return Optional.empty();
         }
     }
 

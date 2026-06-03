@@ -63,6 +63,44 @@ class AnthropicLlmClientTest {
     }
 
     @Test
+    void honoursRetryAfterHeaderOverExponentialBackoff() {
+        // Exponential backoff here would wait >=5s (initial 10s, full-jitter floor = half). A
+        // Retry-After of "0" must short-circuit that, proving the server hint is honoured.
+        AnthropicClientConfig slowBackoff = new AnthropicClientConfig("http://api.test", "2023-06-01",
+                "key", Duration.ofSeconds(5), 3, 10_000, 20_000, 2.0, true);
+        AtomicInteger calls = new AtomicInteger();
+        HttpTransport flaky = (url, headers, body) ->
+                calls.getAndIncrement() == 0
+                        ? new HttpResult(429, "slow down", Map.of("retry-after", "0"))
+                        : new HttpResult(200, OK_JSON, Map.of());
+        AnthropicLlmClient client = new AnthropicLlmClient(slowBackoff, flaky, noStreaming());
+
+        long start = System.nanoTime();
+        LlmClient.Response response = client.complete(request());
+        long elapsedMillis = (System.nanoTime() - start) / 1_000_000;
+
+        assertEquals(2, calls.get());
+        assertEquals("Hello!", response.content());
+        assertTrue(elapsedMillis < 3_000,
+                "Retry-After: 0 should skip the multi-second exponential backoff, was " + elapsedMillis + "ms");
+    }
+
+    @Test
+    void malformedRetryAfterFallsBackToBackoffAndStillSucceeds() {
+        AtomicInteger calls = new AtomicInteger();
+        HttpTransport flaky = (url, headers, body) ->
+                calls.getAndIncrement() == 0
+                        ? new HttpResult(429, "slow down", Map.of("retry-after", "soon"))
+                        : new HttpResult(200, OK_JSON, Map.of());
+        AnthropicLlmClient client = new AnthropicLlmClient(config("key"), flaky, noStreaming());
+
+        LlmClient.Response response = client.complete(request());
+
+        assertEquals(2, calls.get());
+        assertEquals("Hello!", response.content());
+    }
+
+    @Test
     void throwsAfterExhaustingRetries() {
         HttpTransport always500 = (url, headers, body) -> new HttpResult(500, "boom", Map.of());
         AnthropicLlmClient client = new AnthropicLlmClient(config("key"), always500, noStreaming());

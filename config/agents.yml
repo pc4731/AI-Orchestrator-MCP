@@ -31,7 +31,11 @@ agents:
       model: opus
       prompt-file: prompts/team-lead.md
       capabilities: [DECOMPOSE_TASKS]
-      max-output-tokens: 4096
+      # Emits the entire task-graph JSON (10-16 tasks, each with title/description/role/deps) — the
+      # largest structured output in the system. Sized to match the architects/developers so the plan
+      # never truncates mid-array (a truncated DAG is invalid JSON → expensive Opus schema-retries,
+      # or worse, silently dropped tasks that poison the whole downstream run).
+      max-output-tokens: 8192
       temperature: 0.2
 
     backend-architect:
