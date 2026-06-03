@@ -119,6 +119,11 @@ public class AgentTaskProcessor implements TaskProcessor {
 
         // Collaboration: gather the outputs of this task's completed dependencies as grounding.
         Map<String, String> upstream = upstreamHandoffs(projectId, task);
+        // Reviewers and QA review REAL code, not summaries: hand them the actual committed file
+        // contents so findings are grounded in what was produced, not in developers' descriptions.
+        if (needsFileAccess(task.assignedRole())) {
+            injectProjectFiles(upstream);
+        }
 
         // Prompt Engineer pre-step — only for worker roles whose task is under-specified, and given
         // the upstream artifacts so it sharpens with real context instead of paraphrasing blind.
@@ -138,14 +143,72 @@ public class AgentTaskProcessor implements TaskProcessor {
         return response;
     }
 
-    /** Dispatch a task: QA gets the build-fix loop, every other role the generic rework loop. */
+    /** Dispatch a task by role: QA gets the build-fix loop, reviewers get the developer-fix path,
+     *  every other role the generic rework loop. */
     private Agent.Response runTask(String projectId, Task task, Agent agent, String refinedPrompt,
                                    Map<String, Object> baseParams, Map<String, String> upstream) {
-        // QA verification gets a build-fix loop (re-run a developer on failure) instead of the
-        // generic rework loop, since re-running QA on a red build would change nothing.
-        return agent.role() == AgentRole.QA_ENGINEER
-                ? verifyWithBuildFix(projectId, task, agent, baseParams, upstream)
-                : runWithRework(projectId, task, agent, refinedPrompt, baseParams, upstream);
+        return switch (agent.role()) {
+            // QA verification gets a build-fix loop (re-run a developer on failure) instead of the
+            // generic rework loop, since re-running QA on a red build would change nothing.
+            case QA_ENGINEER -> verifyWithBuildFix(projectId, task, agent, baseParams, upstream);
+            // Reviewers finish their review (COMPLETED with findings); a developer is dispatched to
+            // FIX the findings rather than re-running the reviewer as pointless "rework".
+            case CODE_REVIEWER, SECURITY_REVIEWER ->
+                    reviewWithDeveloperFix(projectId, task, agent, refinedPrompt, baseParams, upstream);
+            default -> runWithRework(projectId, task, agent, refinedPrompt, baseParams, upstream);
+        };
+    }
+
+    /**
+     * Run a reviewer once. If it flags blocking issues (NEEDS_REVIEW), the review is still <i>done</i>
+     * — so we return COMPLETED with its findings — and the fix is handed to a developer: either the
+     * reviewer already supplied corrected artifacts (committed on its own dispatch), or we dispatch a
+     * developer with the findings as grounding. This replaces re-running the same reviewer as rework.
+     */
+    private Agent.Response reviewWithDeveloperFix(String projectId, Task task, Agent reviewer,
+                                                  String refinedPrompt, Map<String, Object> baseParams,
+                                                  Map<String, String> upstream) {
+        Map<String, String> grounding = new LinkedHashMap<>(upstream);
+        if (!refinedPrompt.isBlank()) {
+            grounding.put("refinedPrompt", refinedPrompt);
+        }
+        Agent.Response review = dispatch(projectId, task, reviewer, task.description(), grounding,
+                baseParams, "developers (reviewing their work)", "Reviewing for " + reviewer.role(), 0);
+        if (review.outcome() != Agent.Outcome.NEEDS_REVIEW) {
+            return review; // no blocking findings — nothing to fix
+        }
+        // The reviewer found blocking issues but its job is complete. If it didn't already supply a
+        // corrected artifact, dispatch a developer to apply the fixes.
+        AgentRole devRole = developerToFix(projectId, task);
+        if (review.artifacts().isEmpty() && agentFactory.supports(devRole)) {
+            String findings = handoffText(reviewFindings(review));
+            Agent developer = agentFactory.create(devRole);
+            Task fixTask = new Task(TaskId.random(), "Fix review findings", task.description(), devRole,
+                    WorkflowState.IN_PROGRESS, List.of(), Map.of(), Instant.now(), Instant.now());
+            String fixInstructions = "A reviewer (" + reviewer.role() + ") found issues that must be "
+                    + "fixed. Apply the fixes and return the corrected files as artifacts.\n\nFindings:\n"
+                    + findings;
+            Map<String, String> fixGrounding = new LinkedHashMap<>(upstream);
+            fixGrounding.put("reviewFindings", findings);
+            dispatch(projectId, fixTask, developer, fixInstructions, fixGrounding, baseParams,
+                    reviewer.role().name(), "Fixing " + reviewer.role() + " findings by " + devRole, 1);
+        }
+        // The review is complete; the fix has been dispatched/applied. Don't re-run the reviewer.
+        return new Agent.Response(Agent.Outcome.COMPLETED, review.structuredOutput(), review.artifacts(),
+                review.confidence(), review.assumptions(), Optional.empty());
+    }
+
+    /** Flatten a reviewer's findings (output.findings + escalationReason) into developer-actionable text. */
+    private static String reviewFindings(Agent.Response review) {
+        StringBuilder sb = new StringBuilder();
+        review.escalationReason().ifPresent(r -> sb.append(r).append('\n'));
+        Object findings = review.structuredOutput().get("findings");
+        if (findings != null) {
+            sb.append(findings);
+        } else {
+            sb.append(String.valueOf(review.structuredOutput()));
+        }
+        return sb.toString().strip();
     }
 
     /**
@@ -436,6 +499,44 @@ public class AgentTaskProcessor implements TaskProcessor {
     /** Cap on hand-off / grounding text passed between agents — generous (keeps full specs/schemas)
      *  but bounded so a runaway output can't bloat every downstream prompt. */
     private static final int HANDOFF_MAX_CHARS = 12_000;
+
+    /** Roles that review actual code and so need the real file contents, not just summaries. */
+    private static boolean needsFileAccess(AgentRole role) {
+        return role == AgentRole.CODE_REVIEWER || role == AgentRole.SECURITY_REVIEWER
+                || role == AgentRole.QA_ENGINEER;
+    }
+
+    /** Add the actual committed project files to a reviewer's/QA's grounding (capped). */
+    private void injectProjectFiles(Map<String, String> grounding) {
+        StringBuilder sb = new StringBuilder();
+        int total = 0;
+        try {
+            for (String path : artifactRepository.list("")) {
+                if (path.startsWith(".git/") || path.equals(".project/knowledge.md")) {
+                    continue;
+                }
+                Optional<String> content = artifactRepository.read(path);
+                if (content.isEmpty() || content.get().isBlank()) {
+                    continue;
+                }
+                String body = content.get();
+                if (body.length() > 8_000) {
+                    body = body.substring(0, 8_000) + "\n…[truncated]";
+                }
+                String entry = "--- " + path + " ---\n" + body + "\n\n";
+                if (total + entry.length() > 48_000) {
+                    break; // keep the grounding bounded; reviewers see the most files that fit
+                }
+                sb.append(entry);
+                total += entry.length();
+            }
+        } catch (RuntimeException e) {
+            return; // never let file-reading break the task
+        }
+        if (sb.length() > 0) {
+            grounding.put("projectFiles", sb.toString().strip());
+        }
+    }
 
     /** Full text for downstream grounding, stripped and capped only against pathological sizes. */
     private static String handoffText(String text) {

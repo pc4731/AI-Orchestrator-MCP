@@ -5,6 +5,7 @@ import com.orchestration.agent.AgentFactory;
 import com.orchestration.agent.AgentId;
 import com.orchestration.agent.AgentRole;
 import com.orchestration.agent.Capability;
+import com.orchestration.artifact.ArtifactRepository;
 import com.orchestration.artifact.JGitArtifactRepository;
 import com.orchestration.audit.InMemoryAuditLog;
 import com.orchestration.knowledge.ProjectKnowledgeStore;
@@ -517,6 +518,86 @@ class AgentTaskProcessorTest {
 
         assertEquals(longSpec, devReq.get().inputArtifacts().get("from_BACKEND_ARCHITECT"),
                 "the full upstream output must reach the downstream agent, not a truncated stub");
+    }
+
+    @Test
+    void reviewerFindingsDispatchADeveloperFixInsteadOfRerunningTheReviewer() {
+        var reviewerRuns = new java.util.concurrent.atomic.AtomicInteger();
+        var devRuns = new java.util.concurrent.atomic.AtomicInteger();
+        AtomicReference<Agent.Request> devReq = new AtomicReference<>();
+        Agent reviewer = new Agent() {
+            @Override public AgentId id() { return new AgentId("rev"); }
+            @Override public AgentRole role() { return AgentRole.CODE_REVIEWER; }
+            @Override public Set<Capability> capabilities() { return Set.of(Capability.REVIEW_CODE); }
+            @Override public boolean canHandle(Task task) { return true; }
+            @Override public Response handle(Request request, Context context) {
+                reviewerRuns.incrementAndGet();
+                return new Response(Outcome.NEEDS_REVIEW, Map.of("findings", "duplicate message bug"),
+                        List.of(), Confidence.HIGH, List.of(), Optional.of("fix the duplicate message bug"));
+            }
+        };
+        Agent dev = new Agent() {
+            @Override public AgentId id() { return new AgentId("dev"); }
+            @Override public AgentRole role() { return AgentRole.BACKEND_DEVELOPER; }
+            @Override public Set<Capability> capabilities() { return Set.of(Capability.WRITE_CODE); }
+            @Override public boolean canHandle(Task task) { return true; }
+            @Override public Response handle(Request request, Context context) {
+                devRuns.incrementAndGet();
+                devReq.set(request);
+                return new Response(Outcome.COMPLETED, Map.of("summary", "fixed"), List.of(),
+                        Confidence.HIGH, List.of(), Optional.empty());
+            }
+        };
+        AgentFactory factory = new AgentFactory() {
+            @Override public Agent create(AgentRole role) { return role == AgentRole.CODE_REVIEWER ? reviewer : dev; }
+            @Override public boolean supports(AgentRole role) {
+                return role == AgentRole.CODE_REVIEWER || role == AgentRole.BACKEND_DEVELOPER;
+            }
+            @Override public Set<AgentRole> supportedRoles() {
+                return Set.of(AgentRole.CODE_REVIEWER, AgentRole.BACKEND_DEVELOPER);
+            }
+        };
+        AgentTaskProcessor processor = new AgentTaskProcessor(
+                factory, new JGitArtifactRepository(repoDir), new InMemoryAuditLog(),
+                ".", List.of("./gradlew", "test"), 2);
+
+        Task reviewTask = new Task(new TaskId("rv1"), "Review", "review the code", AgentRole.CODE_REVIEWER,
+                WorkflowState.PENDING, List.of(), Map.of(), Instant.now(), Instant.now());
+        Agent.Response r = processor.process("p1", reviewTask);
+
+        assertEquals(Agent.Outcome.COMPLETED, r.outcome(), "the review itself is complete");
+        assertEquals(1, reviewerRuns.get(), "the reviewer is NOT re-run as rework");
+        assertEquals(1, devRuns.get(), "a developer is dispatched to fix the findings");
+        assertTrue(devReq.get().inputArtifacts().getOrDefault("reviewFindings", "").contains("duplicate message"));
+    }
+
+    @Test
+    void codeReviewerReceivesTheActualCommittedFileContents() {
+        JGitArtifactRepository repo = new JGitArtifactRepository(repoDir);
+        repo.write(new ArtifactRepository.WriteRequest("t0", "BACKEND_DEVELOPER", "scaffold",
+                List.of(new ArtifactRepository.FileChange("src/App.java", "class App { /* SECRET_MARKER */ }"))));
+
+        AtomicReference<Agent.Request> reviewerReq = new AtomicReference<>();
+        Agent reviewer = new Agent() {
+            @Override public AgentId id() { return new AgentId("rev"); }
+            @Override public AgentRole role() { return AgentRole.CODE_REVIEWER; }
+            @Override public Set<Capability> capabilities() { return Set.of(Capability.REVIEW_CODE); }
+            @Override public boolean canHandle(Task task) { return true; }
+            @Override public Response handle(Request request, Context context) {
+                reviewerReq.set(request);
+                return new Response(Outcome.COMPLETED, Map.of("summary", "looks good"), List.of(),
+                        Confidence.HIGH, List.of(), Optional.empty());
+            }
+        };
+        AgentTaskProcessor processor = new AgentTaskProcessor(
+                factoryReturning(reviewer), repo, new InMemoryAuditLog());
+
+        processor.process("p1", new Task(new TaskId("rv1"), "Review", "review", AgentRole.CODE_REVIEWER,
+                WorkflowState.PENDING, List.of(), Map.of(), Instant.now(), Instant.now()));
+
+        String files = reviewerReq.get().inputArtifacts().getOrDefault("projectFiles", "");
+        assertTrue(files.contains("SECRET_MARKER"), "the reviewer must see the real file contents");
+        assertTrue(files.contains("src/App.java"), "with file paths");
     }
 
     @Test

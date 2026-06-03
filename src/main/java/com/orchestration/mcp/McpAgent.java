@@ -229,8 +229,10 @@ public class McpAgent implements Agent {
                             + "findings in output.findings as a list of {file, issue, severity, "
                             + "suggestion}, and a short verdict in output.summary. Set status "
                             + "NEEDS_REVIEW (with specifics) if there are blocking quality issues so the "
-                            + "developer reworks them; otherwise COMPLETED. Do not rewrite the app "
-                            + "yourself.";
+                            + "developer reworks them; otherwise COMPLETED. The ACTUAL committed code is "
+                            + "in the projectFiles grounding — review against the real files, not just "
+                            + "the developers' summaries. You are done once you report findings; a "
+                            + "developer will be dispatched to fix them. Do not rewrite the app yourself.";
             case CONTENT_WRITER ->
                     "Write the product's copy from the spec and design: UI strings/microcopy, empty/error "
                             + "states, onboarding, help/docs, and any marketing content requested. Match a "
@@ -321,7 +323,8 @@ public class McpAgent implements Agent {
                             + "fix it). Also confirm a RUN.md with build/run/test steps exists at the repo "
                             + "root; if it is missing, set NEEDS_REVIEW. If there are no tests or they "
                             + "don't exercise the features, say so and set NEEDS_REVIEW. Always include "
-                            + "reproducible details on any failure.";
+                            + "reproducible details on any failure. The actual committed code is in the "
+                            + "projectFiles grounding — verify against the real files, not summaries.";
         };
     }
 
