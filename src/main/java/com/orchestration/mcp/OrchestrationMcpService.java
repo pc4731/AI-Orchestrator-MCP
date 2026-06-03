@@ -121,10 +121,12 @@ public class OrchestrationMcpService {
                 "message", "Project started. Run the loop AUTONOMOUSLY: call orchestrate_next, act as "
                         + "the agent it returns, call orchestrate_submit, and repeat until nextAction is "
                         + "STOP. The team may pause to ask the USER clarifying questions or to confirm "
-                        + "its understanding — those are answered by the human in the web dashboard (by "
-                        + "voice or text), NOT by you. While one is pending, orchestrate_next simply "
-                        + "returns 'no task ready' — keep polling; it will hand you the next agent task "
-                        + "once the user has answered in the UI.");
+                        + "its understanding. These are answerable in BOTH the web dashboard (by voice "
+                        + "or text) AND here: when you are idle, orchestrate_next returns nextAction "
+                        + "ASK_USER — relay it to the user and submit ONLY their real answer. Whichever "
+                        + "channel answers first wins; if the user used the dashboard, your submit will "
+                        + "say it is already completed — just call orchestrate_next again. NEVER answer "
+                        + "a user question yourself.");
     }
 
     /**
@@ -191,6 +193,14 @@ public class OrchestrationMcpService {
                     + "with this taskId and your result. Do not ask the user — keep the loop going.");
             return response;
         }
+        // Dual-channel human Q&A: with no agent task ready, if the team is waiting on the user,
+        // ALSO surface the question here so it can be answered in the CLI chat — the UI shows it in
+        // parallel the whole time, and whichever channel answers first wins (the other then finds it
+        // already completed). Agent work is polled first above, so this never starves the loop.
+        List<McpBridge.PendingTask> openQuestions = bridge.pendingUserQuestions();
+        if (!openQuestions.isEmpty()) {
+            return userQuery(openQuestions.get(0));
+        }
         String state = currentState();
         // End-of-run retrospective: before reporting a terminal state, run one final reflection on
         // friction with the orchestrator (most valuable on FAILED/BLOCKED) and deliver it to you.
@@ -223,6 +233,31 @@ public class OrchestrationMcpService {
         // Not finished but nothing ready this instant (a task is running): tell the client to retry.
         return Map.of("status", state, "nextAction", "CALL_NEXT",
                 "message", "No task ready this moment; call orchestrate_next again to continue the loop.");
+    }
+
+    /**
+     * Surface a pending USER question to the CLI as an ASK_USER prompt. Non-destructive: the same
+     * question stays available in the UI ({@code /api/questions}); whichever channel answers first
+     * completes it and the other sees it gone.
+     */
+    private Map<String, Object> userQuery(McpBridge.PendingTask t) {
+        Map<String, Object> query = new LinkedHashMap<>();
+        query.put("taskId", t.taskId());
+        query.put("forUser", true);
+        query.put("title", t.title());
+        query.put("questionsForUser", t.description());
+        query.put("responseSchema", t.responseSchema());
+
+        Map<String, Object> response = new LinkedHashMap<>();
+        response.put("userQuery", query);
+        response.put("nextAction", "ASK_USER");
+        response.put("message", "The team is waiting on the USER. This is also open in the web "
+                + "dashboard (answerable there by voice or text). If the user replies to you here, "
+                + "relay questionsForUser verbatim and submit ONLY their real answer via "
+                + "orchestrate_submit with this taskId, output matching responseSchema. If they answer "
+                + "in the dashboard instead, your submit will report it already completed — just call "
+                + "orchestrate_next again. Do NOT answer on the user's behalf.");
+        return response;
     }
 
     /** Deliver an agent's result for a task and advance the workflow. */
