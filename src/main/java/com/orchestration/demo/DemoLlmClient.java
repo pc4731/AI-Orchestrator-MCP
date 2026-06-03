@@ -33,10 +33,12 @@ public class DemoLlmClient implements LlmClient {
 
     private static final String CODE = """
             {"status":"COMPLETED","confidence":"HIGH",
-             "output":{"summary":"Implemented add and subtract in a small calculator class."},
+             "output":{"summary":"Implemented add and subtract in a small calculator class, with tests."},
              "artifacts":[
                {"path":"src/main/java/demo/Calculator.java",
-                "content":"package demo;\\n\\npublic class Calculator {\\n    public int add(int a, int b) { return a + b; }\\n    public int subtract(int a, int b) { return a - b; }\\n}\\n"}
+                "content":"package demo;\\n\\npublic class Calculator {\\n    public int add(int a, int b) { return a + b; }\\n    public int subtract(int a, int b) { return a - b; }\\n}\\n"},
+               {"path":"src/test/java/demo/CalculatorTest.java",
+                "content":"package demo;\\n\\nimport org.junit.jupiter.api.Test;\\nimport static org.junit.jupiter.api.Assertions.assertEquals;\\n\\nclass CalculatorTest {\\n    @Test void addsAndSubtracts() {\\n        Calculator c = new Calculator();\\n        assertEquals(5, c.add(2, 3));\\n        assertEquals(1, c.subtract(3, 2));\\n    }\\n}\\n"}
              ]}""";
 
     @Override
