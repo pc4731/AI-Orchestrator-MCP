@@ -5,6 +5,7 @@ import com.orchestration.agent.Agent;
 import com.orchestration.agent.AgentPrompts;
 import com.orchestration.agent.AgentRole;
 import com.orchestration.engine.OrchestrationEngine;
+import com.orchestration.feedback.FeedbackReporter;
 import com.orchestration.knowledge.ProjectKnowledgeStore;
 import com.orchestration.memory.MemoryStore;
 import com.orchestration.task.GraphSnapshot;
@@ -35,43 +36,64 @@ public class OrchestrationMcpService {
     private final ActiveProject activeProject;
     private final ProjectKnowledgeStore knowledgeStore; // optional; used by explain(remember=true)
     private final String workspaceDir;
+    private final FeedbackReporter feedbackReporter; // optional; delivers the end-of-run retrospective
     private final McpResponseMapper mapper = new McpResponseMapper();
 
     private volatile String activeProjectId;
     // taskId -> rememberProject, for one-off "explain a prebuilt project" tasks (not engine tasks).
     private final Map<String, Boolean> explainTasks = new ConcurrentHashMap<>();
+    // End-of-run retrospective state for the active project.
+    private volatile boolean retrospectiveEnabled;
+    private volatile boolean retrospectiveDelivered;
+    private volatile String retrospectiveTaskId;
 
     public OrchestrationMcpService(OrchestrationEngine engine, McpBridge bridge,
                                    MemoryStore memoryStore, ActiveProject activeProject) {
-        this(engine, bridge, memoryStore, activeProject, null, ".");
+        this(engine, bridge, memoryStore, activeProject, null, ".", null);
     }
 
     public OrchestrationMcpService(OrchestrationEngine engine, McpBridge bridge,
                                    MemoryStore memoryStore, ActiveProject activeProject,
                                    ProjectKnowledgeStore knowledgeStore, String workspaceDir) {
+        this(engine, bridge, memoryStore, activeProject, knowledgeStore, workspaceDir, null);
+    }
+
+    public OrchestrationMcpService(OrchestrationEngine engine, McpBridge bridge,
+                                   MemoryStore memoryStore, ActiveProject activeProject,
+                                   ProjectKnowledgeStore knowledgeStore, String workspaceDir,
+                                   FeedbackReporter feedbackReporter) {
         this.engine = Objects.requireNonNull(engine, "engine");
         this.bridge = Objects.requireNonNull(bridge, "bridge");
         this.memoryStore = Objects.requireNonNull(memoryStore, "memoryStore");
         this.activeProject = Objects.requireNonNull(activeProject, "activeProject");
         this.knowledgeStore = knowledgeStore;
         this.workspaceDir = (workspaceDir == null || workspaceDir.isBlank()) ? "." : workspaceDir;
+        this.feedbackReporter = feedbackReporter;
     }
 
     /** Start a project from a feature request; returns once the first agent task is ready. */
     public Map<String, Object> start(String featureRequest) {
-        return start(featureRequest, false);
+        return start(featureRequest, false, false);
+    }
+
+    public Map<String, Object> start(String featureRequest, boolean rememberProject) {
+        return start(featureRequest, rememberProject, false);
     }
 
     /**
-     * Start a project. {@code rememberProject} opts in to the persistent project brain (records and
-     * reads a committed knowledge brief) — only worth it for projects continued across sessions; it
-     * is off by default so one-shot runs pay nothing for it.
+     * Start a project. {@code rememberProject} opts in to the persistent project brain; {@code
+     * retrospective} opts in to the end-of-run analysis of friction with the orchestrator, which is
+     * delivered to the maintainer (email, else the backlog file).
      */
-    public Map<String, Object> start(String featureRequest, boolean rememberProject) {
+    public Map<String, Object> start(String featureRequest, boolean rememberProject,
+                                     boolean retrospective) {
         if (featureRequest == null || featureRequest.isBlank()) {
             return Map.of("error", "featureRequest is required");
         }
         bridge.armStart();
+        retrospectiveEnabled = retrospective && feedbackReporter != null;
+        retrospectiveDelivered = false;
+        retrospectiveTaskId = null;
         Map<String, Object> options = Map.of("rememberProject", rememberProject);
         Thread.ofVirtual().name("mcp-project").start(() -> {
             try {
@@ -174,6 +196,12 @@ public class OrchestrationMcpService {
             return response;
         }
         String state = currentState();
+        // End-of-run retrospective: before reporting a terminal state, run one final reflection on
+        // friction with the orchestrator (most valuable on FAILED/BLOCKED) and deliver it to you.
+        if (retrospectiveEnabled && !retrospectiveDelivered
+                && ("DONE".equals(state) || "FAILED".equals(state) || "BLOCKED".equals(state))) {
+            return retrospectiveTask(state);
+        }
         if ("DONE".equals(state)) {
             return Map.of("status", state, "nextAction", "STOP",
                     "message", "Project DONE. Loop complete — summarize the result for the user. "
@@ -234,6 +262,9 @@ public class OrchestrationMcpService {
         if (explainTasks.containsKey(taskId)) {
             return submitExplanation(taskId, response);
         }
+        if (taskId.equals(retrospectiveTaskId)) {
+            return submitRetrospective(response);
+        }
         boolean accepted = bridge.complete(taskId, response);
         if (!accepted) {
             return Map.of("accepted", false, "error", "unknown or already-completed taskId: " + taskId);
@@ -272,6 +303,81 @@ public class OrchestrationMcpService {
                 "savedAsProjectBrief", saved,
                 "message", "Explanation complete — present output.explanation to the user."
                         + (saved ? " It was also saved as the project brief for future sessions." : ""));
+    }
+
+    /** Synthesize the final RETROSPECTIVE_ANALYST task (not an engine/bridge task). */
+    private Map<String, Object> retrospectiveTask(String state) {
+        if (retrospectiveTaskId == null) {
+            retrospectiveTaskId = "retro-" + UUID.randomUUID();
+        }
+        Map<String, Object> task = new LinkedHashMap<>();
+        task.put("taskId", retrospectiveTaskId);
+        task.put("role", AgentRole.RETROSPECTIVE_ANALYST.name());
+        task.put("title", "Retrospective: how to improve the orchestrator");
+        task.put("persona", AgentPrompts.defaultPrompt(AgentRole.RETROSPECTIVE_ANALYST));
+        task.put("instructions", "The project just finished with outcome: " + state + ". Run a "
+                + "retrospective on THIS run, focused ONLY on friction with the orchestration SYSTEM "
+                + "itself (missing roles/capabilities, rigid schemas, weak hand-offs/context, the "
+                + "budget, no way to ask the user or run a command, repeated rework/blocked tasks) — "
+                + "not bugs in the built project. List concrete improvements to the orchestrator.");
+        task.put("responseSchema", "{\"status\":\"COMPLETED\",\"output\":{\"improvements\":"
+                + "[{\"problem\":\"...\",\"impact\":\"...\",\"suggestion\":\"...\","
+                + "\"severity\":\"HIGH|MEDIUM|LOW\"}],\"summary\":\"...\"}}");
+        Map<String, Object> response = new LinkedHashMap<>();
+        response.put("task", task);
+        response.put("nextAction", "SUBMIT");
+        response.put("hint", "Final step: reflect on the run you just orchestrated and submit your "
+                + "improvement notes for the orchestrator. After submitting, the project is complete.");
+        return response;
+    }
+
+    /** Deliver the retrospective (email, else backlog file) and end the run. */
+    private Map<String, Object> submitRetrospective(Agent.Response response) {
+        retrospectiveDelivered = true;
+        String report = formatImprovements(response);
+        String delivery = feedbackReporter == null || report.isBlank()
+                ? "no feedback to send"
+                : feedbackReporter.deliver(activeProjectId, currentState(), report);
+        return Map.of(
+                "accepted", true,
+                "nextAction", "STOP",
+                "feedbackDelivery", delivery,
+                "message", "Retrospective delivered (" + delivery + "). Project complete — summarize "
+                        + "the result for the user.");
+    }
+
+    /** Render the analyst's improvements into a readable Markdown report for delivery. */
+    private static String formatImprovements(Agent.Response r) {
+        StringBuilder sb = new StringBuilder();
+        Object summary = r.structuredOutput().get("summary");
+        if (summary != null && !summary.toString().isBlank()) {
+            sb.append(summary).append("\n\n");
+        }
+        Object improvements = r.structuredOutput().get("improvements");
+        if (improvements instanceof List<?> list) {
+            for (Object item : list) {
+                if (item instanceof Map<?, ?> m) {
+                    sb.append("- [").append(field(m, "severity")).append("] ")
+                            .append(field(m, "problem")).append('\n');
+                    String impact = field(m, "impact");
+                    String suggestion = field(m, "suggestion");
+                    if (!impact.isBlank()) {
+                        sb.append("    impact: ").append(impact).append('\n');
+                    }
+                    if (!suggestion.isBlank()) {
+                        sb.append("    suggestion: ").append(suggestion).append('\n');
+                    }
+                } else if (item != null && !item.toString().isBlank()) {
+                    sb.append("- ").append(item).append('\n');
+                }
+            }
+        }
+        return sb.toString().strip();
+    }
+
+    private static String field(Map<?, ?> map, String key) {
+        Object v = map.get(key);
+        return v == null ? "" : v.toString();
     }
 
     /** Current project status plus the task graph (states + dependencies). */

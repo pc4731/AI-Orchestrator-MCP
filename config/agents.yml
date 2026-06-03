@@ -166,3 +166,11 @@ agents:
       capabilities: [EXPLAIN_PROJECT]
       max-output-tokens: 4096
       temperature: 0.2
+
+    retrospective-analyst:
+      role: RETROSPECTIVE_ANALYST
+      model: sonnet
+      prompt-file: prompts/retrospective-analyst.md
+      capabilities: [ANALYZE_PROCESS]
+      max-output-tokens: 2048
+      temperature: 0.3

@@ -26,6 +26,11 @@ dependencies {
     implementation 'org.springframework.boot:spring-boot-starter-web'
     implementation 'org.springframework.boot:spring-boot-starter-validation'
 
+    // Email delivery for the end-of-run retrospective (orchestrator self-improvement feedback).
+    // JavaMailSender is auto-configured only when spring.mail.host is set; otherwise feedback falls
+    // back to a local backlog file, so this is optional at runtime.
+    implementation 'org.springframework.boot:spring-boot-starter-mail'
+
     // Structured (JSON) agent I/O. Version managed by the Spring Boot BOM.
     implementation 'com.fasterxml.jackson.core:jackson-databind'
 

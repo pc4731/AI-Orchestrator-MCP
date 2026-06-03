@@ -30,6 +30,7 @@ import java.time.Duration;
         SandboxProperties.class,
         WorkspaceProperties.class,
         KnowledgeProperties.class,
+        FeedbackProperties.class,
         SkillsProperties.class
 })
 public class OrchestrationConfig {

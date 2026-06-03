@@ -284,6 +284,18 @@ public class McpAgent implements Agent {
                             + "files you actually read — never guess or invent behaviour; if something is "
                             + "unclear, say so. Do NOT modify any files. Put the full explanation in "
                             + "output.explanation as Markdown and a one-paragraph output.summary.";
+            case RETROSPECTIVE_ANALYST ->
+                    "Run a retrospective on the project you just orchestrated, focused ONLY on friction "
+                            + "with the ORCHESTRATION SYSTEM itself — not bugs in the built project. Think "
+                            + "about where the tooling slowed the team or forced a workaround: missing "
+                            + "roles/capabilities, rigid schemas, weak hand-offs/context, the budget "
+                            + "cutting work off, no way to ask the user or run a command, repeated rework "
+                            + "or blocked tasks, anything you wished the orchestrator did. Put a list in "
+                            + "output.improvements where each item is {problem, impact (how it hurt this "
+                            + "run), suggestion (a concrete change to the orchestrator), severity "
+                            + "HIGH|MEDIUM|LOW}, and a short output.summary. Be specific and grounded in "
+                            + "what actually happened this run; if the run went smoothly, say so and "
+                            + "return few or no items. Do NOT suggest changes to the built project.";
             case KNOWLEDGE_CURATOR ->
                     "Distil everything the team produced (provided as grounding: the spec, market "
                             + "research, architecture, schema, UI design, code summaries, and the prior "

@@ -25,6 +25,7 @@ import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class AgentTaskProcessorTest {
@@ -334,6 +335,69 @@ class AgentTaskProcessorTest {
 
         assertEquals("USE_LAYERED_ARCH",
                 devRequest.get().inputArtifacts().get("from_BACKEND_ARCHITECT"));
+    }
+
+    @Test
+    void handoffsAreScopedPerProjectAndEvictedOnCompletion() {
+        Agent architect = new Agent() {
+            @Override public AgentId id() { return new AgentId("arch"); }
+            @Override public AgentRole role() { return AgentRole.BACKEND_ARCHITECT; }
+            @Override public Set<Capability> capabilities() { return Set.of(Capability.DESIGN_ARCHITECTURE); }
+            @Override public boolean canHandle(Task task) { return true; }
+            @Override public Response handle(Request request, Context context) {
+                return new Response(Outcome.COMPLETED, Map.of("instructions", "USE_LAYERED_ARCH"),
+                        List.of(), Confidence.HIGH, List.of(), Optional.empty());
+            }
+        };
+        AtomicReference<Agent.Request> devRequest = new AtomicReference<>();
+        Agent developer = new Agent() {
+            @Override public AgentId id() { return new AgentId("dev"); }
+            @Override public AgentRole role() { return AgentRole.BACKEND_DEVELOPER; }
+            @Override public Set<Capability> capabilities() { return Set.of(Capability.WRITE_CODE); }
+            @Override public boolean canHandle(Task task) { return true; }
+            @Override public Response handle(Request request, Context context) {
+                devRequest.set(request);
+                return new Response(Outcome.COMPLETED, Map.of("summary", "built"),
+                        List.of(), Confidence.HIGH, List.of(), Optional.empty());
+            }
+        };
+        AgentFactory factory = new AgentFactory() {
+            @Override public Agent create(AgentRole role) {
+                return role == AgentRole.BACKEND_ARCHITECT ? architect : developer;
+            }
+            @Override public boolean supports(AgentRole role) {
+                return role == AgentRole.BACKEND_ARCHITECT || role == AgentRole.BACKEND_DEVELOPER;
+            }
+            @Override public Set<AgentRole> supportedRoles() {
+                return Set.of(AgentRole.BACKEND_ARCHITECT, AgentRole.BACKEND_DEVELOPER);
+            }
+        };
+        AgentTaskProcessor processor = new AgentTaskProcessor(
+                factory, new JGitArtifactRepository(repoDir), new InMemoryAuditLog(),
+                ".", List.of("./gradlew", "test"), 0);
+
+        TaskId archId = new TaskId("arch-1");
+        Task archTask = new Task(archId, "Design", "design it", AgentRole.BACKEND_ARCHITECT,
+                WorkflowState.PENDING, List.of(), Map.of(), Instant.now(), Instant.now());
+        Task devTask = new Task(new TaskId("dev-1"), "Build", "build it", AgentRole.BACKEND_DEVELOPER,
+                WorkflowState.PENDING, List.of(archId), Map.of(), Instant.now(), Instant.now());
+
+        // Another project depending on the SAME dependency id never sees p1's hand-off (isolation).
+        processor.process("p1", archTask);
+        processor.process("p2", devTask);
+        assertNull(devRequest.get().inputArtifacts().get("from_BACKEND_ARCHITECT"),
+                "a different project must not read another project's hand-offs");
+
+        // Within p1 the downstream task does receive it...
+        processor.process("p1", devTask);
+        assertEquals("USE_LAYERED_ARCH",
+                devRequest.get().inputArtifacts().get("from_BACKEND_ARCHITECT"));
+
+        // ...until the project completes, which releases the board.
+        processor.onProjectComplete("p1");
+        processor.process("p1", devTask);
+        assertNull(devRequest.get().inputArtifacts().get("from_BACKEND_ARCHITECT"),
+                "completing a project must evict its hand-offs");
     }
 
     @Test

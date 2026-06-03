@@ -57,8 +57,10 @@ public class AgentTaskProcessor implements TaskProcessor {
     private final ProjectKnowledgeStore knowledgeStore; // optional; null disables the project brain
     private final ClarificationGateway clarifier; // optional; lets a blocked worker ask the user
 
-    // Completed task outputs, keyed by task id, shared across the project's tasks.
-    private final Map<String, Handoff> handoffs = new ConcurrentHashMap<>();
+    // Completed task outputs per project: projectId -> (taskId -> Handoff). Scoped per project and
+    // evicted on completion (onProjectComplete) so a long-running server doesn't accumulate the
+    // hand-offs of every project it ever ran.
+    private final Map<String, Map<String, Handoff>> handoffs = new ConcurrentHashMap<>();
 
     /** Convenience for tests: working dir ".", Gradle test command, 2 rework attempts, no knowledge. */
     public AgentTaskProcessor(AgentFactory agentFactory,
@@ -119,7 +121,7 @@ public class AgentTaskProcessor implements TaskProcessor {
         baseParams.putAll(task.metadata());
 
         // Collaboration: gather the outputs of this task's completed dependencies as grounding.
-        Map<String, String> upstream = upstreamHandoffs(task);
+        Map<String, String> upstream = upstreamHandoffs(projectId, task);
 
         Agent.Response response = runTask(projectId, task, agent, refinedPrompt, baseParams, upstream);
 
@@ -129,7 +131,7 @@ public class AgentTaskProcessor implements TaskProcessor {
         response = resolveIfBlocked(projectId, task, agent, refinedPrompt, baseParams, upstream, response);
 
         // Publish this task's output to the collaboration board for downstream agents.
-        recordHandoff(task, agent, response);
+        recordHandoff(projectId, task, agent, response);
         // The Knowledge Curator's brief is committed as the project knowledge file for future sessions.
         persistKnowledge(projectId, task, agent, response);
         return response;
@@ -295,7 +297,7 @@ public class AgentTaskProcessor implements TaskProcessor {
             if (response.outcome() != Agent.Outcome.NEEDS_REVIEW) {
                 break; // build is green (or an outcome a developer can't fix)
             }
-            AgentRole devRole = developerToFix(task);
+            AgentRole devRole = developerToFix(projectId, task);
             if (!agentFactory.supports(devRole)) {
                 break; // no developer available to repair the build
             }
@@ -337,9 +339,10 @@ public class AgentTaskProcessor implements TaskProcessor {
 
     /** The developer role responsible for the code under test — derived from the QA task's
      *  completed dependencies, defaulting to the backend developer. */
-    private AgentRole developerToFix(Task task) {
+    private AgentRole developerToFix(String projectId, Task task) {
+        Map<String, Handoff> board = handoffs.getOrDefault(projectId, Map.of());
         for (TaskId dep : task.dependsOn()) {
-            Handoff h = handoffs.get(dep.value());
+            Handoff h = board.get(dep.value());
             if (h != null && h.role().endsWith("_DEVELOPER")) {
                 try {
                     return AgentRole.valueOf(h.role());
@@ -367,10 +370,11 @@ public class AgentTaskProcessor implements TaskProcessor {
     }
 
     /** Collect the outputs of this task's completed dependencies, keyed for prompt grounding. */
-    private Map<String, String> upstreamHandoffs(Task task) {
+    private Map<String, String> upstreamHandoffs(String projectId, Task task) {
         Map<String, String> upstream = new LinkedHashMap<>();
+        Map<String, Handoff> board = handoffs.getOrDefault(projectId, Map.of());
         for (TaskId dep : task.dependsOn()) {
-            Handoff h = handoffs.get(dep.value());
+            Handoff h = board.get(dep.value());
             if (h != null && !h.summary().isBlank()) {
                 // e.g. "from_BACKEND_ARCHITECT" -> the architect's spec/instructions.
                 upstream.put("from_" + h.role(), h.summary());
@@ -380,7 +384,7 @@ public class AgentTaskProcessor implements TaskProcessor {
     }
 
     /** Record a task's output so dependents can build on it; audit the hand-off for the live view. */
-    private void recordHandoff(Task task, Agent agent, Agent.Response response) {
+    private void recordHandoff(String projectId, Task task, Agent agent, Agent.Response response) {
         if (response == null) {
             return;
         }
@@ -394,7 +398,14 @@ public class AgentTaskProcessor implements TaskProcessor {
                 break;
             }
         }
-        handoffs.put(task.id().value(), new Handoff(agent.role().name(), summary));
+        handoffs.computeIfAbsent(projectId, k -> new ConcurrentHashMap<>())
+                .put(task.id().value(), new Handoff(agent.role().name(), summary));
+    }
+
+    /** Release a finished project's collaboration board so it isn't retained for the process's life. */
+    @Override
+    public void onProjectComplete(String projectId) {
+        handoffs.remove(projectId);
     }
 
     /** When the Knowledge Curator finishes, commit its brief as the project knowledge file. */
@@ -452,9 +463,9 @@ public class AgentTaskProcessor implements TaskProcessor {
 
     private boolean needsRefinement(AgentRole role) {
         return switch (role) {
-            // don't refine the meta-roles (planning/research/QA verification/knowledge/explanation)
+            // don't refine the meta-roles (planning/research/QA/knowledge/explanation/retrospective)
             case PROMPT_ENGINEER, BUSINESS_ANALYST, MARKET_RESEARCHER, TEAM_LEAD, QA_ENGINEER,
-                 KNOWLEDGE_CURATOR, PROJECT_EXPLAINER -> false;
+                 KNOWLEDGE_CURATOR, PROJECT_EXPLAINER, RETROSPECTIVE_ANALYST -> false;
             default -> true;
         };
     }

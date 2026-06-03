@@ -15,4 +15,12 @@ import com.orchestration.task.Task;
 public interface TaskProcessor {
 
     Agent.Response process(String projectId, Task task);
+
+    /**
+     * Signal that a project has reached a non-resumable terminal state (DONE/FAILED), so any
+     * per-project state held by the processor (e.g. collaboration hand-offs) can be released.
+     * Default no-op — implementations that hold no per-project state need not override it.
+     */
+    default void onProjectComplete(String projectId) {
+    }
 }

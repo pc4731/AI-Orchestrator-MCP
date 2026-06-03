@@ -284,6 +284,15 @@ public class DefaultOrchestrationEngine implements OrchestrationEngine {
         exec.state = terminal;
         audit(exec.projectId, null, AuditLog.EventType.STATE_CHANGE, "Project " + terminal);
         checkpoint(exec);
+        // Release per-project processor state only for non-resumable terminals (DONE/FAILED). BLOCKED
+        // and NEEDS_CLARIFICATION can resume, and their hand-offs must survive for downstream tasks.
+        if (terminal.isTerminal()) {
+            try {
+                processor.onProjectComplete(exec.projectId);
+            } catch (RuntimeException e) {
+                audit(exec.projectId, null, AuditLog.EventType.ERROR, "onProjectComplete failed: " + e);
+            }
+        }
     }
 
     // ------------------------------------------------------------------------

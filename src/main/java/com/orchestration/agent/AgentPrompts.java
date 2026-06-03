@@ -76,6 +76,9 @@ public final class AgentPrompts {
             case PROJECT_EXPLAINER -> "the Project Explainer; you read an unfamiliar, prebuilt codebase "
                     + "and explain what it does and how it works — its purpose, architecture, stack, "
                     + "entry points, and key flows — grounded strictly in the files you actually read";
+            case RETROSPECTIVE_ANALYST -> "the Retrospective Analyst; after a run you reflect on the "
+                    + "friction the TEAM hit with the orchestration system itself (not the project) and "
+                    + "propose concrete improvements to the orchestrator so it gets better over time";
         };
         return "You are " + responsibility + ". Be precise, ground your output in the given inputs, "
                 + "and never fabricate APIs, libraries, or facts.";

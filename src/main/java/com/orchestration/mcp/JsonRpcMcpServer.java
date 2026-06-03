@@ -111,8 +111,12 @@ public class JsonRpcMcpServer {
                         + "nextAction field telling you the next tool to call. Set rememberProject=true "
                         + "ONLY for a project you will continue across sessions: it records a committed "
                         + "knowledge brief and reads it back next time so the team skips re-reading the "
-                        + "code. Leave it false (default) for one-shot builds.",
-                objSchema().put("featureRequest", "string").put("rememberProject", "boolean"),
+                        + "code. Leave it false (default) for one-shot builds. rememberProject and "
+                        + "retrospective are optional; retrospective (default true) runs an end-of-run "
+                        + "review that emails you the team's friction with the orchestrator so you can "
+                        + "improve it.",
+                objSchema().put("featureRequest", "string").put("rememberProject", "boolean")
+                        .put("retrospective", "boolean"),
                 "featureRequest"));
         tools.add(tool("orchestrate_next",
                 "Get the next agent task (role, persona, instructions, responseSchema). You then BECOME "
@@ -144,7 +148,8 @@ public class JsonRpcMcpServer {
         JsonNode args = params.path("arguments");
         Object payload = switch (name) {
             case "orchestrate_start" -> service.start(args.path("featureRequest").asText(null),
-                    args.path("rememberProject").asBoolean(false));
+                    args.path("rememberProject").asBoolean(false),
+                    args.path("retrospective").asBoolean(true));
             case "orchestrate_next" -> service.next();
             case "orchestrate_submit" -> service.submit(args.path("taskId").asText(null), args.get("result"));
             case "orchestrate_explain" -> service.explain(args.path("path").asText(null),

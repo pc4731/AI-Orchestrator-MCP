@@ -23,6 +23,24 @@ workspace:
     enabled: true
     path: .project/knowledge.md
 
+# Orchestrator self-improvement feedback: after a run, the Retrospective Analyst's notes on friction
+# with the orchestrator are emailed to you. To enable email, set FEEDBACK_EMAIL_TO and the SMTP
+# settings below (spring.mail.*) via env. Without them, feedback is appended to the backlog file.
+feedback:
+  enabled: true
+  to: ${FEEDBACK_EMAIL_TO:}
+  from: ${FEEDBACK_EMAIL_FROM:agent-orchestrator@localhost}
+  backlog-file: feedback/improvements.md
+# Email (optional). Provide these via env to turn on SMTP delivery; leave unset to use the backlog
+# file. Example for Gmail: SMTP_HOST=smtp.gmail.com, SMTP_PORT=587, SMTP_USER=you@gmail.com,
+# SMTP_PASSWORD=<app password>.
+# spring.mail.host: ${SMTP_HOST}
+# spring.mail.port: ${SMTP_PORT:587}
+# spring.mail.username: ${SMTP_USER}
+# spring.mail.password: ${SMTP_PASSWORD}
+# spring.mail.properties.mail.smtp.auth: true
+# spring.mail.properties.mail.smtp.starttls.enable: true
+
 logging:
   level:
     com.orchestration: INFO

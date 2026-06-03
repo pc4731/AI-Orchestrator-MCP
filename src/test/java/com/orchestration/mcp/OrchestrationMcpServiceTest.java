@@ -48,6 +48,9 @@ class OrchestrationMcpServiceTest {
                     + "{\"id\":\"b\",\"title\":\"Build\",\"description\":\"d\",\"role\":\"BACKEND_DEVELOPER\",\"dependsOn\":[\"a\"]}]}}";
             case "BACKEND_DEVELOPER" -> "{\"status\":\"COMPLETED\",\"confidence\":\"HIGH\",\"artifacts\":["
                     + "{\"path\":\"src/App.java\",\"content\":\"class App {}\"}]}";
+            case "RETROSPECTIVE_ANALYST" -> "{\"status\":\"COMPLETED\",\"output\":{\"summary\":\"ran ok\","
+                    + "\"improvements\":[{\"problem\":\"no lint gate\",\"impact\":\"slow QA\","
+                    + "\"suggestion\":\"add a lint step before QA\",\"severity\":\"MEDIUM\"}]}}";
             default -> "{\"status\":\"COMPLETED\",\"confidence\":\"HIGH\",\"output\":{\"design\":\"layered\"}}";
         };
     }
@@ -92,6 +95,51 @@ class OrchestrationMcpServiceTest {
 
             assertEquals("DONE", service.status().get("state"), "project should finish; reached: " + state);
             assertEquals("class App {}", repo.read("src/App.java").orElseThrow());
+        } finally {
+            memory.close();
+        }
+    }
+
+    @Test
+    void deliversTheRetrospectiveAfterTheRunWhenEnabled() throws Exception {
+        McpBridge bridge = new McpBridge();
+        AgentFactory factory = new McpAgentFactory(agents(), bridge,
+                com.orchestration.agent.SkillRegistry.empty());
+        SqliteMemoryStore memory = SqliteMemoryStore.inMemory();
+        java.nio.file.Path backlog = repoDir.resolve("feedback").resolve("improvements.md");
+        try {
+            JGitArtifactRepository repo = new JGitArtifactRepository(repoDir);
+            InMemoryAuditLog audit = new InMemoryAuditLog();
+            DefaultOrchestrationEngine engine = new DefaultOrchestrationEngine(
+                    new TeamLeadProjectPlanner(factory),
+                    new AgentTaskProcessor(factory, repo, audit), memory, audit);
+            // No mailer -> feedback is written to the backlog file.
+            com.orchestration.feedback.FeedbackReporter reporter =
+                    new com.orchestration.feedback.FeedbackReporter(null, true, "", "bot@x", backlog);
+            OrchestrationMcpService service = new OrchestrationMcpService(
+                    engine, bridge, memory, new com.orchestration.web.ActiveProject(), null, ".", reporter);
+
+            service.start("Build a todo app", false, true); // retrospective ON
+            boolean sawRetrospective = false;
+            long deadline = System.nanoTime() + java.time.Duration.ofSeconds(30).toNanos();
+            while (System.nanoTime() < deadline) {
+                Map<String, Object> next = service.next();
+                Object taskObj = next.get("task");
+                if (taskObj instanceof Map<?, ?> task) {
+                    String role = String.valueOf(task.get("role"));
+                    if ("RETROSPECTIVE_ANALYST".equals(role)) {
+                        sawRetrospective = true;
+                    }
+                    service.submit(String.valueOf(task.get("taskId")), mapper.readTree(cannedResult(role)));
+                } else if ("DONE".equals(next.get("status")) || "FAILED".equals(next.get("status"))) {
+                    break;
+                }
+            }
+
+            assertTrue(sawRetrospective, "a retrospective task should be offered at the end of the run");
+            assertTrue(java.nio.file.Files.exists(backlog), "the feedback backlog file should be written");
+            assertTrue(java.nio.file.Files.readString(backlog).contains("add a lint step before QA"),
+                    "the delivered report should contain the analyst's suggestion");
         } finally {
             memory.close();
         }
