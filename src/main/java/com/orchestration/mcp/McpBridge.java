@@ -2,6 +2,8 @@ package com.orchestration.mcp;
 
 import com.orchestration.agent.Agent;
 
+import java.util.Collections;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -56,16 +58,25 @@ public class McpBridge {
     }
 
     private final LinkedBlockingQueue<PendingTask> queue = new LinkedBlockingQueue<>();
+    // USER-audience questions are held separately so the human answers them in the web UI (by voice
+    // or text), rather than Claude Code relaying them — that is what routes all human communication
+    // through the dashboard. Ordered by arrival for a stable UI.
+    private final Map<String, PendingTask> userQuestions =
+            Collections.synchronizedMap(new LinkedHashMap<>());
     private final Map<String, CompletableFuture<Agent.Response>> awaiting = new ConcurrentHashMap<>();
     private volatile CompletableFuture<String> startRendezvous;
 
     // ---- engine side (called from McpAgent.handle on background threads) ----
 
-    /** Park a task and block until Claude Code submits its result. */
+    /** Park a task and block until its result is submitted (by Claude for agents, the UI for users). */
     public Agent.Response dispatch(PendingTask task) {
         CompletableFuture<Agent.Response> future = new CompletableFuture<>();
         awaiting.put(task.taskId(), future);
-        queue.add(task);
+        if (task.audience() == Audience.USER) {
+            userQuestions.put(task.taskId(), task); // answered via the web UI, not the agent loop
+        } else {
+            queue.add(task);
+        }
         CompletableFuture<String> rendezvous = startRendezvous;
         if (rendezvous != null && !rendezvous.isDone()) {
             rendezvous.complete(task.projectId()); // first dispatch reveals the project id to start()
@@ -105,8 +116,16 @@ public class McpBridge {
         if (future == null) {
             return false;
         }
+        userQuestions.remove(taskId);
         future.complete(response);
         return true;
+    }
+
+    /** Open questions awaiting a human answer in the UI (the team paused to ask the user). */
+    public List<PendingTask> pendingUserQuestions() {
+        synchronized (userQuestions) {
+            return List.copyOf(userQuestions.values());
+        }
     }
 
     /** Task ids currently awaiting a result (parked or in-flight). */

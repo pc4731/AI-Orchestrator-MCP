@@ -57,10 +57,34 @@
   .ERROR .tag { color:#fca5a5; }
   .empty { color:var(--muted); font-style:italic; }
   .hint { color:var(--muted); font-size:11px; margin-bottom:8px; }
+
+  /* Voice toggle in the header */
+  .voice { float:right; display:flex; gap:8px; align-items:center; }
+  .voice button { padding:6px 12px; border:1px solid var(--line); border-radius:20px; background:#1c2444; color:var(--txt); cursor:pointer; font-size:12px; }
+  .voice button.on { background:#0c4a2b; border-color:#1c7a47; color:#86efac; }
+
+  /* The conversation card — the team is asking the user something */
+  .ask { margin:0 22px 0; padding:16px 18px; border:1px solid #3d2a70; border-left:4px solid #8b5cf6;
+         border-radius:10px; background:#1a1733; box-shadow:0 0 0 1px #2a2350; }
+  .ask.hidden { display:none; }
+  .ask .qlabel { font-size:11px; text-transform:uppercase; letter-spacing:.08em; color:#c4b5fd; margin-bottom:6px; }
+  .ask .qtext { font-size:15px; font-weight:600; margin-bottom:12px; white-space:pre-wrap; }
+  .ask textarea { width:100%; min-height:54px; padding:10px 12px; border-radius:8px; border:1px solid var(--line); background:#0c1020; color:var(--txt); font:inherit; resize:vertical; }
+  .ask .row { display:flex; gap:8px; margin-top:10px; align-items:center; flex-wrap:wrap; }
+  .ask .row button { padding:9px 16px; border:0; border-radius:8px; font-weight:600; cursor:pointer; }
+  .ask .send { background:var(--accent); color:#fff; }
+  .ask .approve { background:#0c4a2b; color:#86efac; }
+  .ask .changes { background:#3d2a70; color:#ddd6fe; }
+  .ask .mic { background:#1c2444; color:var(--txt); border:1px solid var(--line); }
+  .ask .mic.live { background:#5b1717; color:#fca5a5; border-color:#7a2020; animation:pulse 1.2s infinite; }
+  .ask .spk { color:var(--muted); font-size:12px; margin-left:auto; }
 </style>
 </head>
 <body>
   <header>
+    <div class="voice">
+      <button id="voiceToggle" class="on" title="Read the team's questions aloud">🔊 Voice on</button>
+    </div>
     <h1>AI Agent Orchestration — live view</h1>
     <p id="subtitle">Submit a feature request and watch the agents collaborate.</p>
   </header>
@@ -73,6 +97,19 @@
   <div class="status" id="status">No project running.</div>
 
   <div class="active idle" id="active">Idle — no agent working yet.</div>
+
+  <div class="ask hidden" id="ask">
+    <div class="qlabel" id="qlabel">The team is asking you</div>
+    <div class="qtext" id="qtext"></div>
+    <textarea id="answer" placeholder="Type your answer, or tap 🎤 and speak…"></textarea>
+    <div class="row">
+      <button class="mic" id="mic" title="Speak your answer">🎤 Speak</button>
+      <button class="send" id="sendAnswer">Send answer</button>
+      <button class="approve" id="approve" style="display:none">✓ Approve</button>
+      <button class="changes" id="requestChanges" style="display:none">Request changes</button>
+      <span class="spk" id="spk"></span>
+    </div>
+  </div>
 
   <div class="grid">
     <div class="col">
@@ -109,6 +146,11 @@ async function init() {
   }
   // Fade the active banner back to idle if nothing happens for a while.
   setInterval(() => { if (activeRole && Date.now() - lastActiveAt > 8000) setIdle(); }, 2000);
+
+  // The conversation: poll for questions the team is asking, and wire up voice.
+  setupVoice();
+  setInterval(pollQuestions, 1200);
+  pollQuestions();
 }
 
 async function pollActive() {
@@ -221,6 +263,119 @@ function addEvent(ev) {
 }
 
 function esc(s) { return String(s).replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c])); }
+
+// ---------------------------------------------------------------------------
+// Conversation + voice: the team asks the user questions; the user answers here
+// by typing or speaking. Voice uses the browser's built-in Web Speech API.
+// ---------------------------------------------------------------------------
+let voiceOn = true, recognition = null, listening = false;
+let currentQuestionId = null, spokenId = null, answering = false;
+
+function setupVoice() {
+  $('voiceToggle').addEventListener('click', () => {
+    voiceOn = !voiceOn;
+    $('voiceToggle').className = voiceOn ? 'on' : '';
+    $('voiceToggle').textContent = voiceOn ? '🔊 Voice on' : '🔇 Voice off';
+    if (!voiceOn && window.speechSynthesis) window.speechSynthesis.cancel();
+  });
+  $('sendAnswer').addEventListener('click', () => sendAnswer(true));
+  $('approve').addEventListener('click', () => sendAnswer(true, true));
+  $('requestChanges').addEventListener('click', () => sendAnswer(false));
+  $('mic').addEventListener('click', toggleMic);
+
+  const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+  if (SR) {
+    recognition = new SR();
+    recognition.lang = 'en-US';
+    recognition.interimResults = true;
+    recognition.continuous = false;
+    recognition.onresult = (e) => {
+      let text = '';
+      for (let i = 0; i < e.results.length; i++) text += e.results[i][0].transcript;
+      $('answer').value = text;
+    };
+    recognition.onend = () => { listening = false; $('mic').className = 'mic'; $('mic').textContent = '🎤 Speak'; };
+    recognition.onerror = () => { listening = false; $('mic').className = 'mic'; $('mic').textContent = '🎤 Speak'; };
+  } else {
+    $('mic').style.display = 'none'; // browser has no speech recognition
+  }
+}
+
+function toggleMic() {
+  if (!recognition) return;
+  if (listening) { recognition.stop(); return; }
+  try {
+    if (window.speechSynthesis) window.speechSynthesis.cancel(); // don't transcribe our own TTS
+    recognition.start();
+    listening = true;
+    $('mic').className = 'mic live';
+    $('mic').textContent = '● Listening…';
+  } catch (e) {}
+}
+
+function speak(text) {
+  if (!voiceOn || !window.speechSynthesis) return;
+  window.speechSynthesis.cancel();
+  const u = new SpeechSynthesisUtterance(text);
+  u.lang = 'en-US';
+  window.speechSynthesis.speak(u);
+}
+
+async function pollQuestions() {
+  let list = [];
+  try {
+    const res = await fetch('/api/questions');
+    if (!res.ok) return;             // endpoint only exists under the mcp profile
+    list = await res.json();
+  } catch (e) { return; }
+
+  if (!list.length) {
+    if (currentQuestionId) { currentQuestionId = null; $('ask').className = 'ask hidden'; }
+    return;
+  }
+  const q = list[0];
+  if (q.taskId === currentQuestionId) return; // already showing it
+  currentQuestionId = q.taskId;
+  answering = false;
+  renderQuestion(q);
+}
+
+function renderQuestion(q) {
+  const confirm = q.kind === 'confirm';
+  $('qlabel').textContent = confirm ? 'The team wants you to confirm the plan' : 'The team is asking you';
+  $('qtext').textContent = q.question || q.title || 'The team has a question.';
+  $('answer').value = '';
+  $('answer').placeholder = confirm
+    ? 'Approve, or describe the changes you want (type or 🎤)…'
+    : 'Type your answer, or tap 🎤 and speak…';
+  $('sendAnswer').style.display = confirm ? 'none' : '';
+  $('approve').style.display = confirm ? '' : 'none';
+  $('requestChanges').style.display = confirm ? '' : 'none';
+  $('spk').textContent = '';
+  $('ask').className = 'ask';
+  speak($('qtext').textContent);
+}
+
+async function sendAnswer(approve, ignoreText) {
+  if (answering || !currentQuestionId) return;
+  const text = ignoreText ? '' : $('answer').value.trim();
+  if (!approve && !text) { $('spk').textContent = 'Describe the changes you want first.'; return; }
+  answering = true;
+  if (listening && recognition) recognition.stop();
+  if (window.speechSynthesis) window.speechSynthesis.cancel();
+  const id = currentQuestionId;
+  try {
+    await fetch('/api/questions/' + encodeURIComponent(id) + '/answer', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ text, approve })
+    });
+    $('ask').className = 'ask hidden';
+    currentQuestionId = null;
+  } catch (e) {
+    answering = false;
+    $('spk').textContent = 'Could not send — try again.';
+  }
+}
 
 init();
 </script>
