@@ -14,8 +14,16 @@ spring:
       - optional:file:./config/sandbox.yml
 
 workspace:
-  # Git-backed working directory where agents write code/artifacts.
+  # Git-backed working directory where agents write code/artifacts (legacy single-repo profiles:
+  # demo/ui/tests). Under the mcp profile each project instead gets its OWN folder under base-dir.
   repo-dir: ./data/repo
+  # Parent directory for per-project folders (mcp profile). Each run lands in
+  # <base-dir>/<slug-from-request>, isolated with its own Git repo. Defaults to the user's Desktop.
+  # base-dir: ${user.home}/Desktop
+  # mcp profile: actually run the project's test command on the host and gate DONE on the real exit
+  # code (instead of trusting the role-played QA agent). On by default; set false if the host can't
+  # run builds. A build that can't even start (missing toolchain) falls back to the QA agent, not a fail.
+  verify-build: true
   # Committed "project brain" (plaintext Markdown) so a new session starts with context instead of
   # re-reading the whole codebase. It summarises code that ships in the same repo, so it is not
   # encrypted; set enabled:false to turn the feature off (team then works from the code).

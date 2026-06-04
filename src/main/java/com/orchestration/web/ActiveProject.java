@@ -20,6 +20,11 @@ public class ActiveProject {
         this.projectId = projectId;
     }
 
+    /** Stop pointing at any project — the dashboard goes idle instead of following a finished run. */
+    public void clear() {
+        this.projectId = null;
+    }
+
     public Optional<String> get() {
         return Optional.ofNullable(projectId);
     }

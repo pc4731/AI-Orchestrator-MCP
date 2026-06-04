@@ -29,10 +29,14 @@ import com.orchestration.memory.SqliteMemoryStore;
 import com.orchestration.tools.DockerToolExecutor;
 import com.orchestration.tools.SandboxSettings;
 import com.orchestration.tools.ToolExecutor;
+import com.orchestration.verify.ProjectBuildVerifier;
+import com.orchestration.workspace.ProjectWorkspaces;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.context.annotation.Profile;
+import org.springframework.core.env.Environment;
+import org.springframework.core.env.Profiles;
 
 import java.io.IOException;
 import java.io.UncheckedIOException;
@@ -123,12 +127,14 @@ public class InfrastructureConfig {
     @Bean
     public ProjectPlanner projectPlanner(AgentFactory agentFactory, AuditLog auditLog,
                                          ObjectProvider<ClarificationGateway> clarificationGateway,
-                                         ProjectKnowledgeStore knowledgeStore) {
+                                         ProjectKnowledgeStore knowledgeStore,
+                                         ObjectProvider<ProjectWorkspaces> workspaces) {
         // The gateway is only defined under the mcp profile (Claude Code relays to the human); when
         // absent the planner runs its single-pass behaviour with no human in the loop. The knowledge
-        // store gives the team prior context on edits (inert when the feature is disabled).
+        // store gives the team prior context on edits (inert when the feature is disabled). When a
+        // ProjectWorkspaces is present (mcp), the planner opens this project's isolated workspace.
         return new TeamLeadProjectPlanner(agentFactory, auditLog,
-                clarificationGateway.getIfAvailable(), knowledgeStore);
+                clarificationGateway.getIfAvailable(), knowledgeStore, workspaces.getIfAvailable());
     }
 
     @Bean
@@ -138,13 +144,24 @@ public class InfrastructureConfig {
                                        WorkspaceProperties workspace,
                                        BudgetProperties budgets,
                                        ProjectKnowledgeStore knowledgeStore,
-                                       ObjectProvider<ClarificationGateway> clarificationGateway) {
+                                       ObjectProvider<ClarificationGateway> clarificationGateway,
+                                       ObjectProvider<ProjectWorkspaces> workspaces,
+                                       ObjectProvider<ProjectBuildVerifier> buildVerifier,
+                                       Environment environment) {
         int maxRework = budgets.bugLoop() != null ? budgets.bugLoop().maxRetries() : 2;
+        // Under the mcp profile the agents are role-played by Claude Code, which can read the repo on
+        // disk — so hand reviewers/QA a file LIST, not 48KB of inlined contents (that overflowed the
+        // MCP tool-result limit and bloated the driver's context). LLM agents have no filesystem, so
+        // they still get the contents inlined.
+        boolean agentsReadFilesDirectly = environment.acceptsProfiles(Profiles.of("mcp"));
         // The gateway is only defined under the mcp profile; when absent, a blocked worker keeps the
-        // engine's existing escalation behaviour.
+        // engine's existing escalation behaviour. ProjectWorkspaces (mcp) gives each project its own
+        // repo; the artifactRepository/repoDir below are the legacy single-repo fallback otherwise.
+        // ProjectBuildVerifier (mcp, when workspace.verify-build is on) makes QA run the real build.
         return new AgentTaskProcessor(agentFactory, artifactRepository, auditLog,
                 workspace.repoDir(), workspace.testCommand(), maxRework, knowledgeStore,
-                clarificationGateway.getIfAvailable());
+                clarificationGateway.getIfAvailable(), agentsReadFilesDirectly, workspaces.getIfAvailable(),
+                buildVerifier.getIfAvailable());
     }
 
     @Bean(destroyMethod = "shutdown")

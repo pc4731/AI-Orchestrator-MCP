@@ -114,10 +114,23 @@ public class JsonRpcMcpServer {
                         + "code. Leave it false (default) for one-shot builds. rememberProject and "
                         + "retrospective are optional; retrospective (default true) runs an end-of-run "
                         + "review that emails you the team's friction with the orchestrator so you can "
-                        + "improve it.",
-                objSchema().put("featureRequest", "string").put("rememberProject", "boolean")
-                        .put("retrospective", "boolean"),
+                        + "improve it. ASK the user what to name the project and pass it as projectName "
+                        + "(the folder it is created in); if they have no preference, omit it and it "
+                        + "defaults to a slug of the request.",
+                objSchema().put("featureRequest", "string").put("projectName", "string")
+                        .put("rememberProject", "boolean").put("retrospective", "boolean"),
                 "featureRequest"));
+        tools.add(tool("orchestrate_edit",
+                "Modify an EXISTING project (one already built under the workspace) rather than starting "
+                        + "a new one. Pass project as either the project's folder NAME or a full PATH, and "
+                        + "changeRequest describing what to change. The team edits the current code in "
+                        + "place (same folder/Git repo). Returns nextAction=CALL_NEXT — then run the loop "
+                        + "exactly like a build. If the response has needsChoice=true, several projects "
+                        + "matched: ask the user which (from candidates) and call orchestrate_edit again "
+                        + "with the exact name or path.",
+                objSchema().put("project", "string").put("changeRequest", "string")
+                        .put("retrospective", "boolean"),
+                "project", "changeRequest"));
         tools.add(tool("orchestrate_next",
                 "Get the next agent task (role, persona, instructions, responseSchema). You then BECOME "
                         + "that agent: produce its output per the schema and call orchestrate_submit with the "
@@ -138,6 +151,11 @@ public class JsonRpcMcpServer {
         tools.add(tool("orchestrate_status",
                 "Get the current project state and task graph (states + dependencies).",
                 objSchema(), (String[]) null));
+        tools.add(tool("orchestrate_metrics",
+                "Get the quality tally for the current run plus the recent trend across runs: how often "
+                        + "the team needed rework, build fixes, and clarifications, broken down by role. "
+                        + "Use it to answer 'are the agents improving?' — the numbers should fall over time.",
+                objSchema(), (String[]) null));
         ObjectNode result = mapper.createObjectNode();
         result.set("tools", tools);
         return result;
@@ -148,13 +166,18 @@ public class JsonRpcMcpServer {
         JsonNode args = params.path("arguments");
         Object payload = switch (name) {
             case "orchestrate_start" -> service.start(args.path("featureRequest").asText(null),
+                    args.path("projectName").asText(null),
                     args.path("rememberProject").asBoolean(false),
+                    args.path("retrospective").asBoolean(true));
+            case "orchestrate_edit" -> service.edit(args.path("project").asText(null),
+                    args.path("changeRequest").asText(null),
                     args.path("retrospective").asBoolean(true));
             case "orchestrate_next" -> service.next();
             case "orchestrate_submit" -> service.submit(args.path("taskId").asText(null), args.get("result"));
             case "orchestrate_explain" -> service.explain(args.path("path").asText(null),
                     args.path("question").asText(null), args.path("rememberProject").asBoolean(false));
             case "orchestrate_status" -> service.status();
+            case "orchestrate_metrics" -> service.metrics();
             default -> null;
         };
         ObjectNode result = mapper.createObjectNode();

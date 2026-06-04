@@ -3,10 +3,13 @@
 build/
 !gradle/wrapper/gradle-wrapper.jar
 
-# Runtime data (SQLite db, generated workspaces)
-data/
+# Runtime data (SQLite db, generated workspaces, per-run quality tally, retrospective backlog).
+# Root-anchored so these don't also match same-named SOURCE packages (e.g. com/orchestration/metrics).
+/data/
 *.db
-workspace/
+/workspace/
+/metrics/
+/feedback/
 
 # IDE
 .idea/
@@ -18,3 +21,6 @@ workspace/
 
 # Secrets
 .env
+
+# Build artifacts (produced by ./gradlew bootJar into build/libs)
+/dist/

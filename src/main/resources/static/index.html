@@ -132,6 +132,7 @@
 const $ = (id) => document.getElementById(id);
 let evtSource = null, poll = null, currentId = null, mode = 'interactive';
 let activeRole = null, lastActiveAt = 0;
+let missCount = 0, deadId = null;   // stop hammering a project the server no longer knows
 
 async function init() {
   try { mode = (await fetch('/api/info').then(r => r.json())).mode || 'interactive'; }
@@ -161,12 +162,25 @@ async function init() {
 async function pollActive() {
   try {
     const { projectId } = await fetch('/api/active').then(r => r.json());
-    if (projectId && projectId !== currentId) attach(projectId);
+    // Don't re-attach to a project we already detached as gone (avoids a slow re-attach/404 loop).
+    if (projectId && projectId !== currentId && projectId !== deadId) attach(projectId);
   } catch (e) {}
+}
+
+// The active project vanished (server restarted, or it finished and was cleared). Stop polling it.
+function detach(msg) {
+  deadId = currentId;
+  if (poll) { clearInterval(poll); poll = null; }
+  if (evtSource) { evtSource.close(); evtSource = null; }
+  currentId = null;
+  missCount = 0;
+  setIdle(msg);
+  if (mode === 'interactive') $('go').disabled = false;
 }
 
 function attach(projectId) {
   currentId = projectId;
+  missCount = 0;
   $('feed').innerHTML = '';
   $('tasks').innerHTML = '<div class="empty">Loading…</div>';
   if (evtSource) evtSource.close();
@@ -190,10 +204,19 @@ async function submit() {
 
 async function refresh(id) {
   try {
-    const [status, graph] = await Promise.all([
-      fetch('/api/projects/' + id).then(r => r.json()),
-      fetch('/api/projects/' + id + '/graph').then(r => r.json())
+    const [statusRes, graphRes] = await Promise.all([
+      fetch('/api/projects/' + id),
+      fetch('/api/projects/' + id + '/graph')
     ]);
+    // A 404 means the engine no longer knows this project (server restarted, or it was cleared).
+    // Tolerate a couple while a fresh project registers, then stop polling so we don't spam 404s.
+    if (statusRes.status === 404) {
+      if (++missCount >= 3) detach('Project ended.');
+      return;
+    }
+    missCount = 0;
+    const status = await statusRes.json();
+    const graph = await graphRes.json();
     renderStatus(status);
     renderTasks(graph.nodes || []);
     if (['DONE','FAILED'].includes(status.state)) {

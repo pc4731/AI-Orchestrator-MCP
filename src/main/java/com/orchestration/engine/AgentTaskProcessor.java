@@ -9,6 +9,10 @@ import com.orchestration.knowledge.ProjectKnowledgeStore;
 import com.orchestration.task.Task;
 import com.orchestration.task.TaskId;
 import com.orchestration.task.WorkflowState;
+import com.orchestration.verify.ProjectBuildVerifier;
+import com.orchestration.workspace.ProjectWorkspaces;
+
+import java.time.Duration;
 
 import java.time.Instant;
 import java.util.ArrayList;
@@ -56,6 +60,19 @@ public class AgentTaskProcessor implements TaskProcessor {
     private final int maxReworkAttempts;
     private final ProjectKnowledgeStore knowledgeStore; // optional; null disables the project brain
     private final ClarificationGateway clarifier; // optional; lets a blocked worker ask the user
+    // When the agent role-player can read the filesystem itself (MCP mode: Claude Code drives), we
+    // hand reviewers/QA the repo path + file LIST instead of inlining tens of KB of file contents —
+    // they open the real files on demand. This keeps the grounding (and the driver's context) small.
+    private final boolean agentsReadFilesDirectly;
+    // Optional: when present, each project's repo/dir/knowledge is resolved per project id (isolated
+    // workspaces). When null, the single shared repository/workingDir/knowledgeStore above are used.
+    private final ProjectWorkspaces workspaces;
+    // Optional: when present (mcp profile), QA verification runs the REAL build command against the
+    // project folder and gates on the actual exit code, instead of trusting the role-played QA agent.
+    private final ProjectBuildVerifier buildVerifier;
+
+    /** How long a real build/test run may take before it is killed and treated as a failure. */
+    private static final Duration BUILD_TIMEOUT = Duration.ofMinutes(10);
 
     // Completed task outputs per project: projectId -> (taskId -> Handoff). Scoped per project and
     // evicted on completion (onProjectComplete) so a long-running server doesn't accumulate the
@@ -98,6 +115,48 @@ public class AgentTaskProcessor implements TaskProcessor {
                               int maxReworkAttempts,
                               ProjectKnowledgeStore knowledgeStore,
                               ClarificationGateway clarifier) {
+        this(agentFactory, artifactRepository, auditLog, workingDir, defaultTestCommand,
+                maxReworkAttempts, knowledgeStore, clarifier, false);
+    }
+
+    public AgentTaskProcessor(AgentFactory agentFactory,
+                              ArtifactRepository artifactRepository,
+                              AuditLog auditLog,
+                              String workingDir,
+                              List<String> defaultTestCommand,
+                              int maxReworkAttempts,
+                              ProjectKnowledgeStore knowledgeStore,
+                              ClarificationGateway clarifier,
+                              boolean agentsReadFilesDirectly) {
+        this(agentFactory, artifactRepository, auditLog, workingDir, defaultTestCommand,
+                maxReworkAttempts, knowledgeStore, clarifier, agentsReadFilesDirectly, null, null);
+    }
+
+    public AgentTaskProcessor(AgentFactory agentFactory,
+                              ArtifactRepository artifactRepository,
+                              AuditLog auditLog,
+                              String workingDir,
+                              List<String> defaultTestCommand,
+                              int maxReworkAttempts,
+                              ProjectKnowledgeStore knowledgeStore,
+                              ClarificationGateway clarifier,
+                              boolean agentsReadFilesDirectly,
+                              ProjectWorkspaces workspaces) {
+        this(agentFactory, artifactRepository, auditLog, workingDir, defaultTestCommand,
+                maxReworkAttempts, knowledgeStore, clarifier, agentsReadFilesDirectly, workspaces, null);
+    }
+
+    public AgentTaskProcessor(AgentFactory agentFactory,
+                              ArtifactRepository artifactRepository,
+                              AuditLog auditLog,
+                              String workingDir,
+                              List<String> defaultTestCommand,
+                              int maxReworkAttempts,
+                              ProjectKnowledgeStore knowledgeStore,
+                              ClarificationGateway clarifier,
+                              boolean agentsReadFilesDirectly,
+                              ProjectWorkspaces workspaces,
+                              ProjectBuildVerifier buildVerifier) {
         this.agentFactory = Objects.requireNonNull(agentFactory, "agentFactory");
         this.artifactRepository = Objects.requireNonNull(artifactRepository, "artifactRepository");
         this.auditLog = Objects.requireNonNull(auditLog, "auditLog");
@@ -106,6 +165,23 @@ public class AgentTaskProcessor implements TaskProcessor {
         this.maxReworkAttempts = Math.max(0, maxReworkAttempts);
         this.knowledgeStore = knowledgeStore;
         this.clarifier = clarifier;
+        this.agentsReadFilesDirectly = agentsReadFilesDirectly;
+        this.workspaces = workspaces;
+        this.buildVerifier = buildVerifier;
+    }
+
+    // Per-project resolution: with a workspace provider, each project has its OWN repo/dir/knowledge;
+    // without one, every project shares the single repository/workingDir/knowledgeStore (legacy/tests).
+    private ArtifactRepository repo(String projectId) {
+        return workspaces == null ? artifactRepository : workspaces.get(projectId).repository();
+    }
+
+    private String dir(String projectId) {
+        return workspaces == null ? workingDir : workspaces.get(projectId).dir();
+    }
+
+    private ProjectKnowledgeStore knowledge(String projectId) {
+        return workspaces == null ? knowledgeStore : workspaces.get(projectId).knowledge();
     }
 
     @Override
@@ -113,7 +189,7 @@ public class AgentTaskProcessor implements TaskProcessor {
         Agent agent = agentFactory.create(task.assignedRole());
 
         Map<String, Object> baseParams = new LinkedHashMap<>();
-        baseParams.put("workingDir", workingDir);
+        baseParams.put("workingDir", dir(projectId));
         baseParams.put("testCommand", defaultTestCommand);
         baseParams.putAll(task.metadata());
 
@@ -122,7 +198,16 @@ public class AgentTaskProcessor implements TaskProcessor {
         // Reviewers and QA review REAL code, not summaries: hand them the actual committed file
         // contents so findings are grounded in what was produced, not in developers' descriptions.
         if (needsFileAccess(task.assignedRole())) {
-            injectProjectFiles(upstream);
+            injectProjectFiles(projectId, upstream);
+        } else if (agentsReadFilesDirectly && writesCode(task.assignedRole())) {
+            // Anti-drift: a developer's prose hand-off conveys the architect's/DBA's *intent*, but the
+            // *contract* lives in the files they produced (schema, shared types). In MCP mode the
+            // developer (Claude Code) can open those files, so point it at them instead of letting it
+            // re-derive types from a summary and silently diverge.
+            injectProjectFileList(projectId, upstream);
+            // Shift-left safety net: have the developer build/test before submitting, rather than
+            // letting failures surface only at the QA step and bounce back as rework.
+            upstream.put("definitionOfDone", buildBeforeSubmit(projectId, task));
         }
 
         // Prompt Engineer pre-step — only for worker roles whose task is under-specified, and given
@@ -325,7 +410,7 @@ public class AgentTaskProcessor implements TaskProcessor {
             Agent.Request request = new Agent.Request(task, instructions, grounding, baseParams);
             Agent.Context context = new Agent.Context(projectId, task.id().value(), Map.of());
             response = agent.handle(request, context);
-            commitArtifacts(task, agent, response, attempt);
+            commitArtifacts(projectId, task, agent, response, attempt);
 
             audit(projectId, task, agent, AuditLog.EventType.RESPONSE,
                     "outcome=" + response.outcome() + ", confidence=" + response.confidence()
@@ -354,8 +439,16 @@ public class AgentTaskProcessor implements TaskProcessor {
     private Agent.Response verifyWithBuildFix(String projectId, Task task, Agent qa,
                                               Map<String, Object> baseParams,
                                               Map<String, String> upstream) {
-        Agent.Response response = dispatch(projectId, task, qa, task.description(), upstream,
-                baseParams, "developers (verifying their build)", "Verifying build for " + qa.role(), 0);
+        // In mcp mode, prefer running the REAL build command (a verified exit code) over the role-played
+        // QA agent's claim. If the toolchain can't even start, fall back to the role-played path so an
+        // environment issue doesn't block an otherwise-good project.
+        boolean realBuild = buildVerifier != null && agentsReadFilesDirectly;
+        Agent.Response response = realBuild ? runRealBuild(projectId, task, qa, baseParams, 0) : null;
+        if (response == null) {
+            realBuild = false;
+            response = dispatch(projectId, task, qa, task.description(), upstream,
+                    baseParams, "developers (verifying their build)", "Verifying build for " + qa.role(), 0);
+        }
 
         for (int attempt = 1; attempt <= maxReworkAttempts; attempt++) {
             if (response.outcome() != Agent.Outcome.NEEDS_REVIEW) {
@@ -377,10 +470,60 @@ public class AgentTaskProcessor implements TaskProcessor {
             dispatch(projectId, fixTask, developer, fixInstructions, fixGrounding, baseParams,
                     qa.role().name(), "Build-fix #" + attempt + " by " + devRole, attempt);
 
-            response = dispatch(projectId, task, qa, task.description(), upstream, baseParams,
-                    devRole.name(), "Re-verifying build (attempt " + attempt + ")", attempt);
+            Agent.Response reverify = realBuild
+                    ? runRealBuild(projectId, task, qa, baseParams, attempt) : null;
+            response = reverify != null ? reverify
+                    : dispatch(projectId, task, qa, task.description(), upstream, baseParams,
+                            devRole.name(), "Re-verifying build (attempt " + attempt + ")", attempt);
         }
         return response;
+    }
+
+    /**
+     * Actually run the project's test command and turn the real exit code into a QA outcome (green →
+     * COMPLETED, non-zero/timeout → NEEDS_REVIEW with the output so a developer can fix it). Returns
+     * null when the command couldn't be launched at all — the caller then degrades to role-played QA.
+     */
+    private Agent.Response runRealBuild(String projectId, Task task, Agent qa,
+                                        Map<String, Object> baseParams, int attempt) {
+        List<String> command = resolveTestCommand(baseParams);
+        String dir = dir(projectId);
+        audit(projectId, task, qa, AuditLog.EventType.PROMPT,
+                "Verifying the real build: " + String.join(" ", command) + " in " + dir,
+                Map.of("role", qa.role().name(), "collaborator", "build",
+                        "prompt", String.join(" ", command) + "\n(cwd: " + dir + ")"));
+        ProjectBuildVerifier.Result r = buildVerifier.verify(dir, command, BUILD_TIMEOUT);
+        if (r.couldNotStart()) {
+            audit(projectId, task, qa, AuditLog.EventType.STATE_CHANGE,
+                    "Real build could not run; falling back to review",
+                    Map.of("role", qa.role().name(), "detail", r.output()));
+            return null;
+        }
+        Map<String, Object> output = new LinkedHashMap<>();
+        output.put("command", command);
+        output.put("exitCode", r.exitCode());
+        output.put("timedOut", r.timedOut());
+        output.put("stdout", r.output());
+        boolean green = r.success();
+        audit(projectId, task, qa, AuditLog.EventType.RESPONSE,
+                "Build " + (green ? "PASSED" : "FAILED (exit " + r.exitCode() + ")")
+                        + (attempt > 0 ? " (re-verify #" + attempt + ")" : ""),
+                Map.of("role", qa.role().name(),
+                        "outcome", (green ? Agent.Outcome.COMPLETED : Agent.Outcome.NEEDS_REVIEW).name(),
+                        "detail", green ? "build green" : summarizeText(r.output())));
+        Optional<String> reason = green ? Optional.empty()
+                : Optional.of("Build failed (exit " + r.exitCode() + (r.timedOut() ? ", timed out" : "") + ")");
+        return new Agent.Response(green ? Agent.Outcome.COMPLETED : Agent.Outcome.NEEDS_REVIEW,
+                output, List.of(), Agent.Confidence.HIGH, List.of(), reason);
+    }
+
+    /** The effective test command for this task: a per-task override (task metadata) else the default. */
+    private List<String> resolveTestCommand(Map<String, Object> baseParams) {
+        Object cmd = baseParams.get("testCommand");
+        if (cmd instanceof List<?> list && !list.isEmpty()) {
+            return list.stream().map(String::valueOf).toList();
+        }
+        return defaultTestCommand;
     }
 
     /** One agent invocation: audit the prompt, run it, commit any artifacts, audit the response. */
@@ -392,7 +535,7 @@ public class AgentTaskProcessor implements TaskProcessor {
         Agent.Request request = new Agent.Request(task, instructions, grounding, baseParams);
         Agent.Context context = new Agent.Context(projectId, task.id().value(), Map.of());
         Agent.Response response = agent.handle(request, context);
-        commitArtifacts(task, agent, response, attempt);
+        commitArtifacts(projectId, task, agent, response, attempt);
         audit(projectId, task, agent, AuditLog.EventType.RESPONSE,
                 "outcome=" + response.outcome() + ", confidence=" + response.confidence()
                         + ", artifacts=" + response.artifacts().size(),
@@ -452,20 +595,40 @@ public class AgentTaskProcessor implements TaskProcessor {
         if (response == null) {
             return;
         }
-        // Pass the FULL upstream output downstream (capped only to avoid pathological sizes), not a
+        // The full upstream output is the hand-off (capped only to avoid pathological sizes), not a
         // 280-char stub — later agents need the real architecture/schema/instructions, not a teaser.
-        String summary = response.escalationReason().isPresent()
-                ? "" : handoffText(String.valueOf(response.structuredOutput()));
+        String raw = response.escalationReason().isPresent()
+                ? "" : String.valueOf(response.structuredOutput());
         // Prefer concrete instructions/spec/tokens fields if the agent produced them.
         for (String key : List.of("instructions", "specification", "tokens", "schema", "summary")) {
             Object v = response.structuredOutput().get(key);
             if (v != null && !v.toString().isBlank()) {
-                summary = handoffText(v.toString());
+                raw = v.toString();
                 break;
             }
         }
+        // The hand-off is prose, NOT a committed file, so anything past the cap is unrecoverable by a
+        // downstream agent. Don't drop it silently: surface a visible warning so it can be acted on
+        // (e.g. by having this role commit its spec as a file).
+        warnIfHandoffTruncated(projectId, task, agent, raw);
         handoffs.computeIfAbsent(projectId, k -> new ConcurrentHashMap<>())
-                .put(task.id().value(), new Handoff(agent.role().name(), summary));
+                .put(task.id().value(), new Handoff(agent.role().name(), handoffText(raw)));
+    }
+
+    /** Emit a loud, auditable warning when a hand-off is clipped by the cap — so truncation is never
+     *  silent. Rare in practice; if you see it fire, that role's spec should become a file. */
+    private void warnIfHandoffTruncated(String projectId, Task task, Agent agent, String raw) {
+        if (raw == null || raw.length() <= HANDOFF_MAX_CHARS) {
+            return;
+        }
+        int dropped = raw.length() - HANDOFF_MAX_CHARS;
+        String message = "⚠ " + agent.role() + " hand-off truncated: " + dropped + " of " + raw.length()
+                + " chars dropped (cap " + HANDOFF_MAX_CHARS + "). Downstream agents may miss detail — "
+                + "have this role commit its spec as a file so nothing is lost.";
+        audit(projectId, task, agent, AuditLog.EventType.ERROR, message,
+                Map.of("role", agent.role().name(), "detail", message));
+        System.err.println("[handoff] " + message + " (project " + projectId
+                + ", task " + task.id().value() + ")");
     }
 
     /** Release a finished project's collaboration board so it isn't retained for the process's life. */
@@ -476,7 +639,8 @@ public class AgentTaskProcessor implements TaskProcessor {
 
     /** When the Knowledge Curator finishes, commit its brief as the project knowledge file. */
     private void persistKnowledge(String projectId, Task task, Agent agent, Agent.Response response) {
-        if (knowledgeStore == null || agent.role() != AgentRole.KNOWLEDGE_CURATOR || response == null) {
+        ProjectKnowledgeStore store = knowledge(projectId);
+        if (store == null || agent.role() != AgentRole.KNOWLEDGE_CURATOR || response == null) {
             return;
         }
         Object knowledge = response.structuredOutput().getOrDefault("knowledge",
@@ -485,7 +649,7 @@ public class AgentTaskProcessor implements TaskProcessor {
             return;
         }
         try {
-            knowledgeStore.save(knowledge.toString(), task.id().value(), agent.role().name());
+            store.save(knowledge.toString(), task.id().value(), agent.role().name());
             audit(projectId, task, agent, AuditLog.EventType.RESPONSE,
                     "KNOWLEDGE_CURATOR committed the project knowledge brief",
                     Map.of("role", AgentRole.KNOWLEDGE_CURATOR.name(),
@@ -506,16 +670,75 @@ public class AgentTaskProcessor implements TaskProcessor {
                 || role == AgentRole.QA_ENGINEER;
     }
 
-    /** Add the actual committed project files to a reviewer's/QA's grounding (capped). */
-    private void injectProjectFiles(Map<String, String> grounding) {
-        StringBuilder sb = new StringBuilder();
-        int total = 0;
+    /** The code-writing developer roles — they produce real source and can build/test their work. */
+    private static boolean writesCode(AgentRole role) {
+        return role == AgentRole.BACKEND_DEVELOPER || role == AgentRole.FRONTEND_DEVELOPER
+                || role == AgentRole.AI_ML_DEVELOPER;
+    }
+
+    /** The "build it green before you submit" definition-of-done handed to a developer in MCP mode,
+     *  spelling out the repo location and the exact test command so the brain can actually run it. */
+    private String buildBeforeSubmit(String projectId, Task task) {
+        Object cmd = task.metadata().getOrDefault("testCommand", defaultTestCommand);
+        String command = cmd instanceof List<?> parts
+                ? String.join(" ", parts.stream().map(String::valueOf).toList())
+                : String.valueOf(cmd);
+        String repoPath = java.nio.file.Path.of(dir(projectId)).toAbsolutePath().normalize().toString();
+        return "Before you submit: build and test your work in " + repoPath + " by running `" + command
+                + "` and make sure it compiles and every test passes. If it fails, fix it first — do "
+                + "NOT submit a red build; that just bounces back as rework from QA.";
+    }
+
+    /** Give a reviewer/QA the project files. When the agent can read the filesystem itself (MCP mode),
+     *  hand it the repo location + file LIST so it opens the real files on demand; otherwise inline the
+     *  contents (an LLM agent has no filesystem). The list form keeps the grounding tiny — inlining can
+     *  reach ~48KB, which previously blew past the MCP tool-result limit and bloated the driver's context. */
+    private void injectProjectFiles(String projectId, Map<String, String> grounding) {
+        if (agentsReadFilesDirectly) {
+            injectProjectFileList(projectId, grounding);
+        } else {
+            injectProjectFileContents(projectId, grounding);
+        }
+    }
+
+    /** MCP mode: list the repo's files and point the agent at the real directory to read them itself. */
+    private void injectProjectFileList(String projectId, Map<String, String> grounding) {
+        List<String> files = new ArrayList<>();
         try {
-            for (String path : artifactRepository.list("")) {
+            for (String path : repo(projectId).list("")) {
                 if (path.startsWith(".git/") || path.equals(".project/knowledge.md")) {
                     continue;
                 }
-                Optional<String> content = artifactRepository.read(path);
+                files.add(path);
+            }
+        } catch (RuntimeException e) {
+            return; // never let file-listing break the task
+        }
+        if (files.isEmpty()) {
+            return;
+        }
+        String repoPath = java.nio.file.Path.of(dir(projectId)).toAbsolutePath().normalize().toString();
+        StringBuilder sb = new StringBuilder(
+                "Review the REAL, current project files. They live in this repository on disk:\n")
+                .append(repoPath).append('\n')
+                .append("Open and read them directly with your tools (do NOT rely on summaries). Files:\n");
+        for (String f : files) {
+            sb.append("  - ").append(f).append('\n');
+        }
+        grounding.put("projectFiles", sb.toString().strip());
+    }
+
+    /** LLM mode: inline the actual committed file contents into grounding (capped). */
+    private void injectProjectFileContents(String projectId, Map<String, String> grounding) {
+        ArtifactRepository repository = repo(projectId);
+        StringBuilder sb = new StringBuilder();
+        int total = 0;
+        try {
+            for (String path : repository.list("")) {
+                if (path.startsWith(".git/") || path.equals(".project/knowledge.md")) {
+                    continue;
+                }
+                Optional<String> content = repository.read(path);
                 if (content.isEmpty() || content.get().isBlank()) {
                     continue;
                 }
@@ -619,7 +842,8 @@ public class AgentTaskProcessor implements TaskProcessor {
         return words >= 80 || (words >= 50 && hasCriteria);
     }
 
-    private void commitArtifacts(Task task, Agent agent, Agent.Response response, int attempt) {
+    private void commitArtifacts(String projectId, Task task, Agent agent, Agent.Response response,
+                                 int attempt) {
         if (response.artifacts().isEmpty()) {
             return;
         }
@@ -627,7 +851,7 @@ public class AgentTaskProcessor implements TaskProcessor {
                 .map(a -> new ArtifactRepository.FileChange(a.path(), a.content()))
                 .toList();
         String suffix = attempt > 0 ? " (rework #" + attempt + ")" : "";
-        artifactRepository.write(new ArtifactRepository.WriteRequest(
+        repo(projectId).write(new ArtifactRepository.WriteRequest(
                 task.id().value(), agent.role().name(),
                 "[" + agent.role() + "] " + task.title() + suffix, changes));
     }

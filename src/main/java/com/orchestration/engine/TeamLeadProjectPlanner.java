@@ -5,12 +5,14 @@ import com.orchestration.agent.AgentFactory;
 import com.orchestration.agent.AgentRole;
 import com.orchestration.audit.AuditLog;
 import com.orchestration.knowledge.ProjectKnowledgeStore;
+import com.orchestration.workspace.ProjectWorkspaces;
 import com.orchestration.task.InMemoryTaskGraph;
 import com.orchestration.task.Task;
 import com.orchestration.task.TaskGraph;
 import com.orchestration.task.TaskId;
 import com.orchestration.task.WorkflowState;
 
+import java.nio.file.Path;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -37,6 +39,9 @@ public class TeamLeadProjectPlanner implements ProjectPlanner {
     private final AuditLog auditLog; // optional; when present, planning steps stream to the UI
     private final ClarificationGateway clarifier; // optional; when present, the BA loop asks the user
     private final ProjectKnowledgeStore knowledgeStore; // optional; the prior project brief, if any
+    // Optional: when present, every project gets its OWN workspace (dir + repo + knowledge), opened
+    // here at planning time before any task runs. When null, the legacy single shared repo is used.
+    private final ProjectWorkspaces workspaces;
 
     public TeamLeadProjectPlanner(AgentFactory agentFactory) {
         this(agentFactory, null, null, null);
@@ -53,10 +58,17 @@ public class TeamLeadProjectPlanner implements ProjectPlanner {
 
     public TeamLeadProjectPlanner(AgentFactory agentFactory, AuditLog auditLog,
                                   ClarificationGateway clarifier, ProjectKnowledgeStore knowledgeStore) {
+        this(agentFactory, auditLog, clarifier, knowledgeStore, null);
+    }
+
+    public TeamLeadProjectPlanner(AgentFactory agentFactory, AuditLog auditLog,
+                                  ClarificationGateway clarifier, ProjectKnowledgeStore knowledgeStore,
+                                  ProjectWorkspaces workspaces) {
         this.agentFactory = Objects.requireNonNull(agentFactory, "agentFactory");
         this.auditLog = auditLog;
         this.clarifier = clarifier;
         this.knowledgeStore = knowledgeStore;
+        this.workspaces = workspaces;
     }
 
     /** The result of the clarification loop: the agreed spec plus the accumulated Q&amp;A trail. */
@@ -73,13 +85,22 @@ public class TeamLeadProjectPlanner implements ProjectPlanner {
 
     @Override
     public TaskGraph plan(String projectId, OrchestrationEngine.ProjectRequest request) {
+        // An edit run targets an EXISTING project folder (orchestrate_edit). It always reads the prior
+        // context so the team modifies the current code rather than rebuilding it from scratch.
+        boolean editMode = isEdit(request);
         // Opt-in: the project brain is only worth its cost for projects you'll continue across
-        // sessions. It is OFF by default, so a one-shot run pays nothing for it.
-        boolean rememberProject = rememberProject(request);
+        // sessions. It is OFF by default for fresh builds, but always on for edits.
+        boolean rememberProject = rememberProject(request) || editMode;
+
+        // Open this project's workspace up front so every downstream task writes there, not into a repo
+        // shared with other runs. A fresh build creates ~/<base>/<slug>; an edit reuses the existing
+        // folder. Resolve the matching knowledge store; falls back to the legacy single store when no
+        // provider is wired.
+        ProjectKnowledgeStore knowledge = resolveWorkspaceKnowledge(projectId, request, editMode);
 
         // 0) Prior project brain: if remembering is on and this repo already has a committed knowledge
         //    file, hand it to the team as context so an EDIT starts from understanding, not a re-read.
-        String priorKnowledge = rememberProject ? loadPriorKnowledge() : "";
+        String priorKnowledge = rememberProject ? loadPriorKnowledge(knowledge) : "";
 
         // 1) Market Researcher studies comparable tools, their complaints, and recommends features —
         //    up front, so the questions the BA asks the user are informed by what the market shows.
@@ -109,6 +130,17 @@ public class TeamLeadProjectPlanner implements ProjectPlanner {
         // Tell the Team Lead whether to bother planning a knowledge-capture task (it is also
         // enforced below by stripping any curator task when remembering is off).
         grounding.put("rememberProject", Boolean.toString(rememberProject));
+        // Edit run: tell the Team Lead to MODIFY the existing project, and show it the current files so
+        // it plans changes to real code instead of a greenfield rebuild.
+        if (editMode) {
+            String dir = workspaces == null ? "" : workspaces.directoryOf(projectId).orElse("");
+            String files = existingFiles(projectId);
+            grounding.put("editExistingProject",
+                    "MODIFY the existing project at " + dir + " to satisfy the request. Build on the "
+                            + "current code — do NOT recreate it from scratch. Plan only the tasks needed "
+                            + "for this change."
+                            + (files.isBlank() ? "" : "\nExisting files:\n" + files));
+        }
 
         planAudit(projectId, AgentRole.TEAM_LEAD.name(), AuditLog.EventType.PROMPT,
                 "TEAM_LEAD decomposing the request into tasks",
@@ -231,8 +263,59 @@ public class TeamLeadProjectPlanner implements ProjectPlanner {
     }
 
     /** The prior committed project brief for this session, or "" if none/disabled. */
-    private String loadPriorKnowledge() {
-        return knowledgeStore == null ? "" : knowledgeStore.load().orElse("");
+    private static String loadPriorKnowledge(ProjectKnowledgeStore knowledge) {
+        return knowledge == null ? "" : knowledge.load().orElse("");
+    }
+
+    /** True when this run edits an existing project folder (orchestrate_edit sets options.editDir). */
+    private static boolean isEdit(OrchestrationEngine.ProjectRequest request) {
+        Object dir = request.options().get("editDir");
+        return dir != null && !dir.toString().isBlank();
+    }
+
+    /** Resolve the per-project knowledge store, opening the workspace: a fresh slug folder for a build,
+     *  or the existing folder for an edit. Falls back to the legacy single store with no provider. */
+    private ProjectKnowledgeStore resolveWorkspaceKnowledge(String projectId,
+                                                            OrchestrationEngine.ProjectRequest request,
+                                                            boolean editMode) {
+        if (workspaces == null) {
+            return knowledgeStore;
+        }
+        if (editMode) {
+            return workspaces.openExisting(projectId,
+                    Path.of(request.options().get("editDir").toString())).knowledge();
+        }
+        return workspaces.open(projectId, nameHint(request)).knowledge();
+    }
+
+    /** Folder-naming hint: the explicit projectName if the caller supplied one, else the request text. */
+    private static String nameHint(OrchestrationEngine.ProjectRequest request) {
+        Object name = request.options().get("projectName");
+        return name != null && !name.toString().isBlank() ? name.toString() : request.featureRequest();
+    }
+
+    /** A short listing of the existing project's files, to ground an edit plan (capped). */
+    private String existingFiles(String projectId) {
+        if (workspaces == null) {
+            return "";
+        }
+        try {
+            StringBuilder sb = new StringBuilder();
+            int count = 0;
+            for (String path : workspaces.get(projectId).repository().list("")) {
+                if (path.startsWith(".git/")) {
+                    continue;
+                }
+                sb.append("  - ").append(path).append('\n');
+                if (++count >= 200) {
+                    sb.append("  …\n");
+                    break;
+                }
+            }
+            return sb.toString().strip();
+        } catch (RuntimeException e) {
+            return ""; // never let file-listing break planning
+        }
     }
 
     /** One Business Analyst pass, grounded with the market research and the running Q&amp;A trail. */
@@ -289,7 +372,9 @@ public class TeamLeadProjectPlanner implements ProjectPlanner {
         StringBuilder sb = new StringBuilder("Here is my understanding of what you want built:\n\n");
         sb.append(specification);
         if (!marketResearch.isBlank()) {
-            sb.append("\n\nInformed by market research:\n").append(trim(marketResearch));
+            // Show the full market research here — this is the understanding the user confirms, so it
+            // must be complete and unabridged (the 280-char trim is only for short audit summaries).
+            sb.append("\n\nInformed by market research:\n").append(marketResearch.strip());
         }
         return sb.toString();
     }

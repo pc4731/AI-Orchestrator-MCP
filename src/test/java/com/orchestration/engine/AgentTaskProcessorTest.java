@@ -12,6 +12,8 @@ import com.orchestration.knowledge.ProjectKnowledgeStore;
 import com.orchestration.task.Task;
 import com.orchestration.task.TaskId;
 import com.orchestration.task.WorkflowState;
+import com.orchestration.verify.ProjectBuildVerifier;
+import com.orchestration.workspace.FileProjectWorkspaces;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
@@ -222,6 +224,112 @@ class AgentTaskProcessorTest {
         processor.process("p1", task);
 
         assertEquals(List.of("pytest"), seen.get().parameters().get("testCommand"));
+    }
+
+    // --- Verified build gate (mcp): the REAL build result is authoritative, not the role-played QA. ---
+
+    private static Agent qaAgent(Agent.Outcome rolePlayedOutcome) {
+        return new Agent() {
+            @Override public AgentId id() { return new AgentId("qa"); }
+            @Override public AgentRole role() { return AgentRole.QA_ENGINEER; }
+            @Override public Set<Capability> capabilities() { return Set.of(); }
+            @Override public boolean canHandle(Task task) { return true; }
+            @Override public Response handle(Request request, Context context) {
+                return new Response(rolePlayedOutcome, Map.of("stdout", "role-played QA"),
+                        List.of(), Confidence.HIGH, List.of(), Optional.empty());
+            }
+        };
+    }
+
+    private AgentTaskProcessor verifyingProcessor(Path base, Agent qa, ProjectBuildVerifier verifier) {
+        FileProjectWorkspaces workspaces = new FileProjectWorkspaces(base, true, ".project/knowledge.md");
+        workspaces.open("p1", "calc service");
+        return new AgentTaskProcessor(factoryReturning(qa),
+                new JGitArtifactRepository(repoDir), new InMemoryAuditLog(),
+                ".", List.of("./gradlew", "test"), 0, null, null, true, workspaces, verifier);
+    }
+
+    private static Task qaTask() {
+        return new Task(new TaskId("t1"), "QA", "verify", AgentRole.QA_ENGINEER,
+                WorkflowState.PENDING, List.of(), Map.of(), Instant.now(), Instant.now());
+    }
+
+    @Test
+    void aPassingRealBuildMarksQaCompletedEvenIfTheAgentWouldHaveFlaggedIt(@TempDir Path base) {
+        // Role-played QA would say NEEDS_REVIEW, but the real build passes — the real result wins.
+        ProjectBuildVerifier green = (dir, cmd, to) ->
+                new ProjectBuildVerifier.Result(true, false, 0, false, "BUILD SUCCESSFUL");
+        AgentTaskProcessor processor = verifyingProcessor(base, qaAgent(Agent.Outcome.NEEDS_REVIEW), green);
+
+        assertEquals(Agent.Outcome.COMPLETED, processor.process("p1", qaTask()).outcome());
+    }
+
+    @Test
+    void aFailingRealBuildIsNeverAcceptedEvenIfTheAgentClaimsSuccess(@TempDir Path base) {
+        // Role-played QA would claim COMPLETED, but the real build fails — it must NOT be accepted.
+        ProjectBuildVerifier red = (dir, cmd, to) ->
+                new ProjectBuildVerifier.Result(false, false, 1, false, "compile error");
+        AgentTaskProcessor processor = verifyingProcessor(base, qaAgent(Agent.Outcome.COMPLETED), red);
+
+        assertEquals(Agent.Outcome.NEEDS_REVIEW, processor.process("p1", qaTask()).outcome());
+    }
+
+    @Test
+    void whenTheBuildCannotEvenRunItFallsBackToTheRolePlayedQa(@TempDir Path base) {
+        // Toolchain missing (couldNotStart) — don't block on an environment issue; use the agent's verdict.
+        ProjectBuildVerifier cannotStart = (dir, cmd, to) ->
+                new ProjectBuildVerifier.Result(false, true, -1, false, "gradlew: not found");
+        AgentTaskProcessor processor = verifyingProcessor(base, qaAgent(Agent.Outcome.COMPLETED), cannotStart);
+
+        assertEquals(Agent.Outcome.COMPLETED, processor.process("p1", qaTask()).outcome());
+    }
+
+    // --- Hand-off truncation must be visible, not silent (option C). ---
+
+    private static Agent specAgent(AgentRole role, String instructions) {
+        return new Agent() {
+            @Override public AgentId id() { return new AgentId("spec"); }
+            @Override public AgentRole role() { return role; }
+            @Override public Set<Capability> capabilities() { return Set.of(); }
+            @Override public boolean canHandle(Task task) { return true; }
+            @Override public Response handle(Request request, Context context) {
+                return new Response(Outcome.COMPLETED, Map.of("instructions", instructions),
+                        List.of(), Confidence.HIGH, List.of(), Optional.empty());
+            }
+        };
+    }
+
+    @Test
+    void warnsLoudlyWhenAHandoffIsTruncated() {
+        InMemoryAuditLog audit = new InMemoryAuditLog();
+        String oversized = "x".repeat(13_000); // over the 12,000-char hand-off cap
+        AgentTaskProcessor processor = new AgentTaskProcessor(
+                factoryReturning(specAgent(AgentRole.BACKEND_ARCHITECT, oversized)),
+                new JGitArtifactRepository(repoDir), audit);
+        Task task = new Task(new TaskId("t1"), "Architect", "design it", AgentRole.BACKEND_ARCHITECT,
+                WorkflowState.PENDING, List.of(), Map.of(), Instant.now(), Instant.now());
+
+        processor.process("p1", task);
+
+        assertTrue(audit.all().stream().anyMatch(e ->
+                        e.type() == com.orchestration.audit.AuditLog.EventType.ERROR
+                                && e.summary().contains("truncated")),
+                "a truncated hand-off must surface a visible warning, not be dropped silently");
+    }
+
+    @Test
+    void doesNotWarnForAHandoffWithinTheCap() {
+        InMemoryAuditLog audit = new InMemoryAuditLog();
+        AgentTaskProcessor processor = new AgentTaskProcessor(
+                factoryReturning(specAgent(AgentRole.BACKEND_ARCHITECT, "x".repeat(500))),
+                new JGitArtifactRepository(repoDir), audit);
+        Task task = new Task(new TaskId("t1"), "Architect", "design it", AgentRole.BACKEND_ARCHITECT,
+                WorkflowState.PENDING, List.of(), Map.of(), Instant.now(), Instant.now());
+
+        processor.process("p1", task);
+
+        assertFalse(audit.all().stream().anyMatch(e -> e.summary().contains("truncated")),
+                "a hand-off within the cap must not raise a truncation warning");
     }
 
     @Test

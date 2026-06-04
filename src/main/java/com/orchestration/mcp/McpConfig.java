@@ -5,15 +5,23 @@ import com.orchestration.agent.SkillRegistry;
 import com.orchestration.budget.TokenBudgetManager;
 import com.orchestration.config.AgentsProperties;
 import com.orchestration.config.FeedbackProperties;
+import com.orchestration.config.KnowledgeProperties;
 import com.orchestration.config.WorkspaceProperties;
 import com.orchestration.engine.ClarificationGateway;
 import com.orchestration.engine.OrchestrationEngine;
 import com.orchestration.feedback.FeedbackReporter;
 import com.orchestration.knowledge.ProjectKnowledgeStore;
+import com.orchestration.audit.AuditLog;
 import com.orchestration.memory.MemoryStore;
+import com.orchestration.metrics.MetricsStore;
+import com.orchestration.verify.HostProjectBuildVerifier;
+import com.orchestration.verify.ProjectBuildVerifier;
 import com.orchestration.web.ActiveProject;
+import com.orchestration.workspace.FileProjectWorkspaces;
+import com.orchestration.workspace.ProjectWorkspaces;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.boot.CommandLineRunner;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.context.annotation.Profile;
@@ -33,6 +41,27 @@ public class McpConfig {
     @Bean
     public McpBridge mcpBridge() {
         return new McpBridge();
+    }
+
+    /**
+     * Per-project workspaces: each project Claude Code drives gets its own folder under the configured
+     * base dir (defaults to the Desktop), with an isolated Git repo and knowledge file — so sequential
+     * runs never clobber each other in one shared {@code data/repo}.
+     */
+    @Bean
+    public ProjectWorkspaces projectWorkspaces(WorkspaceProperties workspace, KnowledgeProperties knowledge) {
+        return new FileProjectWorkspaces(Path.of(workspace.baseDir()), knowledge.active(), knowledge.path());
+    }
+
+    /**
+     * Real build verification (mcp profile): runs the project's test command on the host and gates the
+     * QA step on the actual exit code, so DONE means the code provably builds. Only registered when
+     * {@code workspace.verify-build} is on (the default); turn it off if the host can't run builds.
+     */
+    @Bean
+    @ConditionalOnProperty(name = "workspace.verify-build", havingValue = "true", matchIfMissing = true)
+    public ProjectBuildVerifier projectBuildVerifier() {
+        return new HostProjectBuildVerifier();
     }
 
     @Bean
@@ -60,6 +89,13 @@ public class McpConfig {
                 feedback.to(), feedback.from(), Path.of(feedback.backlogFile()));
     }
 
+    /** Append-only trend log of per-run quality tallies, so rework/build-fix counts can be tracked
+     *  across projects (survives restarts). */
+    @Bean
+    public MetricsStore metricsStore() {
+        return new MetricsStore(Path.of("metrics/runs.jsonl"));
+    }
+
     @Bean
     public OrchestrationMcpService orchestrationMcpService(OrchestrationEngine engine,
                                                           McpBridge bridge,
@@ -67,9 +103,12 @@ public class McpConfig {
                                                           ActiveProject activeProject,
                                                           ProjectKnowledgeStore knowledgeStore,
                                                           WorkspaceProperties workspace,
-                                                          FeedbackReporter feedbackReporter) {
+                                                          FeedbackReporter feedbackReporter,
+                                                          ProjectWorkspaces workspaces,
+                                                          AuditLog auditLog,
+                                                          MetricsStore metricsStore) {
         return new OrchestrationMcpService(engine, bridge, memoryStore, activeProject,
-                knowledgeStore, workspace.repoDir(), feedbackReporter);
+                knowledgeStore, workspace.repoDir(), feedbackReporter, workspaces, auditLog, metricsStore);
     }
 
     @Bean
