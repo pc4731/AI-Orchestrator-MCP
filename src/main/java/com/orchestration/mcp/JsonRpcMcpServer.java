@@ -156,6 +156,17 @@ public class JsonRpcMcpServer {
                         + "the team needed rework, build fixes, and clarifications, broken down by role. "
                         + "Use it to answer 'are the agents improving?' — the numbers should fall over time.",
                 objSchema(), (String[]) null));
+        tools.add(tool("orchestrate_review_lessons",
+                "Review and manage the orchestrator's self-improvement. Call with NO action to list pending "
+                        + "lesson proposals (evidence-backed, mined from past runs) AND pruneSuggestions "
+                        + "(learned skills that aren't earning their keep). Then relay to the USER and call "
+                        + "again with: action=approve|reject + lesson id (optional revised 'text') to decide a "
+                        + "proposal; action=prune + text=<ROLE> to remove a role's learned skills; "
+                        + "action=export [+ text=<name>] to bundle learned skills to a portable pack; "
+                        + "action=import + text=<pack path> to stage another install's pack as proposals. "
+                        + "NOTHING changes agent behavior until the user approves — never decide for them.",
+                objSchema().put("action", "string").put("id", "string").put("text", "string"),
+                (String[]) null));
         ObjectNode result = mapper.createObjectNode();
         result.set("tools", tools);
         return result;
@@ -178,6 +189,19 @@ public class JsonRpcMcpServer {
                     args.path("question").asText(null), args.path("rememberProject").asBoolean(false));
             case "orchestrate_status" -> service.status();
             case "orchestrate_metrics" -> service.metrics();
+            case "orchestrate_review_lessons" -> {
+                String action = args.path("action").asText(null);
+                if (action == null || action.isBlank()) {
+                    yield service.reviewLessons();
+                }
+                yield switch (action.toLowerCase(java.util.Locale.ROOT)) {
+                    case "export" -> service.exportLessons(args.path("text").asText(null));
+                    case "import" -> service.importLessons(args.path("text").asText(null));
+                    case "prune" -> service.pruneLearned(args.path("text").asText(null));
+                    default -> service.decideLesson(args.path("id").asText(null), action,
+                            args.path("text").asText(null));
+                };
+            }
             default -> null;
         };
         ObjectNode result = mapper.createObjectNode();

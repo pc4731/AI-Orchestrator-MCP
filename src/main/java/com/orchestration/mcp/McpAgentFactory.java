@@ -51,7 +51,7 @@ public class McpAgentFactory implements AgentFactory {
         List<String> skillNames = definition.map(AgentDefinition::skills).orElse(List.of());
         String prompt = AgentPrompts.append(
                 AgentPrompts.load(definition.map(AgentDefinition::promptFile).orElse(null), role),
-                skills.resolve(skillNames));
+                skills.resolveForRole(role, skillNames));
         return new McpAgent(AgentId.random(), role, capabilities, prompt, bridge, budget);
     }
 

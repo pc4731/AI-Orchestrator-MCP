@@ -12,6 +12,7 @@ import com.orchestration.engine.OrchestrationEngine;
 import com.orchestration.feedback.FeedbackReporter;
 import com.orchestration.knowledge.ProjectKnowledgeStore;
 import com.orchestration.audit.AuditLog;
+import com.orchestration.learning.LessonStore;
 import com.orchestration.memory.MemoryStore;
 import com.orchestration.metrics.MetricsStore;
 import com.orchestration.verify.HostProjectBuildVerifier;
@@ -96,6 +97,13 @@ public class McpConfig {
         return new MetricsStore(Path.of("metrics/runs.jsonl"));
     }
 
+    /** Proposals inbox for the learning loop — evidence-backed lessons mined from finished runs,
+     *  PENDING until the user approves them via orchestrate_review_lessons. */
+    @Bean
+    public LessonStore lessonStore() {
+        return new LessonStore(Path.of("learning/proposals.jsonl"));
+    }
+
     @Bean
     public OrchestrationMcpService orchestrationMcpService(OrchestrationEngine engine,
                                                           McpBridge bridge,
@@ -106,9 +114,12 @@ public class McpConfig {
                                                           FeedbackReporter feedbackReporter,
                                                           ProjectWorkspaces workspaces,
                                                           AuditLog auditLog,
-                                                          MetricsStore metricsStore) {
+                                                          MetricsStore metricsStore,
+                                                          LessonStore lessonStore,
+                                                          SkillRegistry skills) {
         return new OrchestrationMcpService(engine, bridge, memoryStore, activeProject,
-                knowledgeStore, workspace.repoDir(), feedbackReporter, workspaces, auditLog, metricsStore);
+                knowledgeStore, workspace.repoDir(), feedbackReporter, workspaces, auditLog, metricsStore,
+                lessonStore, skills);
     }
 
     @Bean

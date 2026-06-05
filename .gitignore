@@ -10,6 +10,9 @@ build/
 /workspace/
 /metrics/
 /feedback/
+# Learning loop: the raw proposals inbox + export packs are runtime; APPROVED lessons live in
+# config/skills/learned/ (committed on purpose — that's the reviewed, portable change).
+/learning/
 
 # IDE
 .idea/

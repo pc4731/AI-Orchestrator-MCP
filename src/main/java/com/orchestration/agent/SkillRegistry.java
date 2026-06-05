@@ -1,10 +1,15 @@
 package com.orchestration.agent;
 
 import java.io.IOException;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.StandardOpenOption;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
+import java.util.Objects;
 import java.util.Optional;
 import java.util.stream.Stream;
 
@@ -44,6 +49,95 @@ public class SkillRegistry {
             return Optional.of(Files.readString(path).strip());
         } catch (IOException e) {
             return Optional.empty();
+        }
+    }
+
+    /**
+     * Resolve a role's explicit skills PLUS any approved, learned skill committed for that role at
+     * {@code <dir>/learned/<ROLE>.md}. The learned file is how the approval loop makes an agent better:
+     * once promoted, it is auto-attached to every future run of that role with no agents.yml edit.
+     */
+    public String resolveForRole(AgentRole role, List<String> explicitNames) {
+        List<String> all = new ArrayList<>(explicitNames == null ? List.of() : explicitNames);
+        if (role != null && get(learnedName(role)).isPresent()) {
+            all.add(learnedName(role));
+        }
+        return resolve(all);
+    }
+
+    /** Append an approved lesson to the role's learned-skill file (creating it). The git-tracked file
+     *  IS the audit trail and the portability mechanism — a reviewed diff that travels with the repo. */
+    public void promoteLearned(AgentRole role, String lessonMarkdown) {
+        Objects.requireNonNull(role, "role");
+        if (lessonMarkdown == null || lessonMarkdown.isBlank()) {
+            return;
+        }
+        Path path = dir.resolve("learned").resolve(role.name() + ".md");
+        try {
+            if (path.getParent() != null) {
+                Files.createDirectories(path.getParent());
+            }
+            String entry = (Files.exists(path) ? "\n\n" : "") + lessonMarkdown.strip() + "\n";
+            Files.writeString(path, entry, StandardCharsets.UTF_8,
+                    StandardOpenOption.CREATE, StandardOpenOption.APPEND);
+        } catch (IOException e) {
+            throw new SkillWriteException("Failed to write learned skill for " + role, e);
+        }
+    }
+
+    private static String learnedName(AgentRole role) {
+        return "learned/" + role.name();
+    }
+
+    /** Whether an approved, learned skill exists for this role. */
+    public boolean hasLearned(AgentRole role) {
+        return role != null && get(learnedName(role)).isPresent();
+    }
+
+    /** Size (chars) of a role's learned skill — used by the decay check to flag bloated roles. */
+    public int learnedSize(AgentRole role) {
+        return get(learnedName(role)).map(String::length).orElse(0);
+    }
+
+    /** Remove a role's learned skill entirely (it reverts to base behavior). Used by gated pruning. */
+    public void clearLearned(AgentRole role) {
+        Objects.requireNonNull(role, "role");
+        try {
+            Files.deleteIfExists(dir.resolve("learned").resolve(role.name() + ".md"));
+        } catch (IOException e) {
+            throw new SkillWriteException("Failed to clear learned skill for " + role, e);
+        }
+    }
+
+    /** All learned skills (role → content), for exporting a portable lessons pack. */
+    public Map<AgentRole, String> learnedSkills() {
+        Path learnedDir = dir.resolve("learned");
+        Map<AgentRole, String> out = new LinkedHashMap<>();
+        if (!Files.isDirectory(learnedDir)) {
+            return out;
+        }
+        try (Stream<Path> files = Files.list(learnedDir)) {
+            files.filter(p -> p.getFileName().toString().endsWith(".md"))
+                    .sorted()
+                    .forEach(p -> {
+                        String fileName = p.getFileName().toString();
+                        String roleName = fileName.substring(0, fileName.length() - ".md".length());
+                        try {
+                            out.put(AgentRole.valueOf(roleName), Files.readString(p).strip());
+                        } catch (IllegalArgumentException | IOException ignored) {
+                            // skip files that don't map to a known role or can't be read
+                        }
+                    });
+        } catch (IOException e) {
+            return out;
+        }
+        return out;
+    }
+
+    /** Thrown when an approved lesson can't be persisted to its learned-skill file. */
+    public static class SkillWriteException extends RuntimeException {
+        public SkillWriteException(String message, Throwable cause) {
+            super(message, cause);
         }
     }
 

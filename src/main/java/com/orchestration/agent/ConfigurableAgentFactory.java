@@ -81,7 +81,8 @@ public class ConfigurableAgentFactory implements AgentFactory {
                 .map(Capability::valueOf)
                 .collect(Collectors.toUnmodifiableSet());
         String prompt = AgentPrompts.append(
-                AgentPrompts.load(definition.promptFile(), role), skills.resolve(definition.skills()));
+                AgentPrompts.load(definition.promptFile(), role),
+                skills.resolveForRole(role, definition.skills()));
         return new AgentSpec(AgentId.random(), role, capabilities, model, prompt,
                 definition.maxOutputTokens(), definition.temperature(),
                 llmProperties.promptCache().enabled(), DEFAULT_MAX_SCHEMA_RETRIES);

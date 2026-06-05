@@ -68,4 +68,54 @@ class SkillRegistryTest {
         assertEquals("base", AgentPrompts.append("base", null));
         assertEquals("base\n\nextra", AgentPrompts.append("base", "extra"));
     }
+
+    @Test
+    void promoteLearnedWritesARoleSkillThatResolveForRoleThenAttaches() {
+        SkillRegistry registry = new SkillRegistry(dir);
+
+        // No learned skill yet: resolveForRole returns only the explicit skills.
+        assertFalse(registry.resolveForRole(AgentRole.BACKEND_DEVELOPER, List.of()).contains("Always run tests"));
+
+        registry.promoteLearned(AgentRole.BACKEND_DEVELOPER, "Always run tests before submitting.");
+
+        String resolved = registry.resolveForRole(AgentRole.BACKEND_DEVELOPER, List.of());
+        assertTrue(resolved.contains("Always run tests before submitting."),
+                "an approved lesson must auto-attach to that role on future runs");
+        assertTrue(Files.isRegularFile(dir.resolve("learned").resolve("BACKEND_DEVELOPER.md")));
+    }
+
+    @Test
+    void learnedSkillIsScopedToItsRole() {
+        SkillRegistry registry = new SkillRegistry(dir);
+        registry.promoteLearned(AgentRole.QA_ENGINEER, "QA-specific lesson.");
+
+        assertTrue(registry.resolveForRole(AgentRole.QA_ENGINEER, List.of()).contains("QA-specific lesson."));
+        assertFalse(registry.resolveForRole(AgentRole.BACKEND_DEVELOPER, List.of()).contains("QA-specific lesson."),
+                "a learned skill must not leak to other roles");
+    }
+
+    @Test
+    void clearLearnedRemovesIt() {
+        SkillRegistry registry = new SkillRegistry(dir);
+        registry.promoteLearned(AgentRole.BACKEND_DEVELOPER, "a lesson");
+        assertTrue(registry.hasLearned(AgentRole.BACKEND_DEVELOPER));
+
+        registry.clearLearned(AgentRole.BACKEND_DEVELOPER);
+
+        assertFalse(registry.hasLearned(AgentRole.BACKEND_DEVELOPER));
+        assertFalse(registry.resolveForRole(AgentRole.BACKEND_DEVELOPER, List.of()).contains("a lesson"));
+    }
+
+    @Test
+    void learnedSkillsListsEveryRolesLearnedFileForExport() {
+        SkillRegistry registry = new SkillRegistry(dir);
+        registry.promoteLearned(AgentRole.BACKEND_DEVELOPER, "dev lesson");
+        registry.promoteLearned(AgentRole.QA_ENGINEER, "qa lesson");
+
+        var learned = registry.learnedSkills();
+
+        assertEquals(2, learned.size());
+        assertTrue(learned.get(AgentRole.BACKEND_DEVELOPER).contains("dev lesson"));
+        assertTrue(learned.get(AgentRole.QA_ENGINEER).contains("qa lesson"));
+    }
 }

@@ -18,6 +18,7 @@ import java.util.List;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
@@ -140,6 +141,90 @@ class OrchestrationMcpServiceTest {
             assertTrue(java.nio.file.Files.exists(backlog), "the feedback backlog file should be written");
             assertTrue(java.nio.file.Files.readString(backlog).contains("add a lint step before QA"),
                     "the delivered report should contain the analyst's suggestion");
+        } finally {
+            memory.close();
+        }
+    }
+
+    @Test
+    void approvingALessonPromotesItToALearnedSkillForThatRole(@TempDir Path skillsDir,
+                                                              @TempDir Path lessonDir) {
+        McpBridge bridge = new McpBridge();
+        AgentFactory factory = new McpAgentFactory(agents(), bridge,
+                com.orchestration.agent.SkillRegistry.empty());
+        SqliteMemoryStore memory = SqliteMemoryStore.inMemory();
+        try {
+            InMemoryAuditLog audit = new InMemoryAuditLog();
+            DefaultOrchestrationEngine engine = new DefaultOrchestrationEngine(
+                    new TeamLeadProjectPlanner(factory),
+                    new AgentTaskProcessor(factory, new JGitArtifactRepository(repoDir), audit),
+                    memory, audit);
+
+            com.orchestration.learning.LessonStore lessons =
+                    new com.orchestration.learning.LessonStore(lessonDir.resolve("proposals.jsonl"));
+            lessons.record(new com.orchestration.learning.Lesson("L1", "p1", "BACKEND_DEVELOPER",
+                    com.orchestration.learning.Lesson.BUILD_FIX, "Run the build before submitting.",
+                    "compile error", 1, com.orchestration.learning.Lesson.PENDING, "2026-06-05T10:00:00Z"));
+            com.orchestration.agent.SkillRegistry skills = new com.orchestration.agent.SkillRegistry(skillsDir);
+
+            OrchestrationMcpService service = new OrchestrationMcpService(
+                    engine, bridge, memory, new com.orchestration.web.ActiveProject(),
+                    null, ".", null, null, audit, null, lessons, skills);
+
+            assertEquals(1, ((List<?>) service.reviewLessons().get("pending")).size());
+
+            Map<String, Object> decision = service.decideLesson("L1", "approve", null);
+            assertEquals("APPROVED", decision.get("outcome"));
+
+            // Promoted: the lesson now auto-attaches to that role's prompt, and the inbox is cleared.
+            assertTrue(skills.resolveForRole(com.orchestration.agent.AgentRole.BACKEND_DEVELOPER, List.of())
+                    .contains("Run the build before submitting."));
+            assertTrue(((List<?>) service.reviewLessons().get("pending")).isEmpty());
+        } finally {
+            memory.close();
+        }
+    }
+
+    @Test
+    void importsAPackAsPendingProposalsAndPrunesLearnedSkills(@TempDir Path skillsDir,
+                                                              @TempDir Path packDir) throws Exception {
+        McpBridge bridge = new McpBridge();
+        AgentFactory factory = new McpAgentFactory(agents(), bridge,
+                com.orchestration.agent.SkillRegistry.empty());
+        SqliteMemoryStore memory = SqliteMemoryStore.inMemory();
+        try {
+            InMemoryAuditLog audit = new InMemoryAuditLog();
+            DefaultOrchestrationEngine engine = new DefaultOrchestrationEngine(
+                    new TeamLeadProjectPlanner(factory),
+                    new AgentTaskProcessor(factory, new JGitArtifactRepository(repoDir), audit),
+                    memory, audit);
+            com.orchestration.learning.LessonStore lessons =
+                    new com.orchestration.learning.LessonStore(packDir.resolve("proposals.jsonl"));
+            com.orchestration.agent.SkillRegistry skills =
+                    new com.orchestration.agent.SkillRegistry(skillsDir);
+            OrchestrationMcpService service = new OrchestrationMcpService(
+                    engine, bridge, memory, new com.orchestration.web.ActiveProject(),
+                    null, ".", null, null, audit, null, lessons, skills);
+
+            // A pack from "another install" → imports re-stage as PENDING (never auto-applied).
+            Path pack = packDir.resolve("pack.json");
+            com.orchestration.learning.LessonPack.write(pack, new com.orchestration.learning.LessonPack.Bundle(
+                    "2026-06-05T10:00:00Z", "export",
+                    List.of(new com.orchestration.learning.LessonPack.Entry(
+                            "BACKEND_DEVELOPER", "Imported lesson: prefer composition."))));
+
+            Map<String, Object> imported = service.importLessons(pack.toString());
+            assertEquals(1, imported.get("staged"));
+            assertEquals(1, ((List<?>) service.reviewLessons().get("pending")).size());
+            // Not applied until approved:
+            assertFalse(skills.hasLearned(com.orchestration.agent.AgentRole.BACKEND_DEVELOPER));
+
+            // Prune (gated decay): remove a role's learned skills.
+            skills.promoteLearned(com.orchestration.agent.AgentRole.QA_ENGINEER, "some learned lesson");
+            assertTrue(skills.hasLearned(com.orchestration.agent.AgentRole.QA_ENGINEER));
+            Map<String, Object> pruned = service.pruneLearned("QA_ENGINEER");
+            assertEquals("PRUNED", pruned.get("outcome"));
+            assertFalse(skills.hasLearned(com.orchestration.agent.AgentRole.QA_ENGINEER));
         } finally {
             memory.close();
         }
