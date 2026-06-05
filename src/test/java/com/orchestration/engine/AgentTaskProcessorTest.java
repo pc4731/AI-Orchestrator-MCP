@@ -332,6 +332,92 @@ class AgentTaskProcessorTest {
                 "a hand-off within the cap must not raise a truncation warning");
     }
 
+    // --- Artifact-overwrite guard: a truncated/summary artifact must never clobber real source. ---
+
+    /** A developer that returns one artifact at the given path with the given (possibly stub) content. */
+    private static Agent devWritingArtifact(String path, String content) {
+        return new Agent() {
+            @Override public AgentId id() { return new AgentId("dev"); }
+            @Override public AgentRole role() { return AgentRole.BACKEND_DEVELOPER; }
+            @Override public Set<Capability> capabilities() { return Set.of(Capability.WRITE_CODE); }
+            @Override public boolean canHandle(Task task) { return true; }
+            @Override public Response handle(Request request, Context context) {
+                return new Response(Outcome.COMPLETED, Map.of("summary", "done"),
+                        List.of(new Artifact(path, content, "text/plain")),
+                        Confidence.HIGH, List.of(), Optional.empty());
+            }
+        };
+    }
+
+    @Test
+    void refusesToOverwriteRealSourceWithATruncatedArtifact() {
+        JGitArtifactRepository repo = new JGitArtifactRepository(repoDir);
+        InMemoryAuditLog audit = new InMemoryAuditLog();
+        String realSource = "class Base {\n" + "    void work() {}\n".repeat(40) + "}\n"; // > 200 chars
+        repo.write(new ArtifactRepository.WriteRequest("seed", "BACKEND_DEVELOPER", "seed",
+                List.of(new ArtifactRepository.FileChange("src/base.py", realSource))));
+
+        // The agent lists the file with a placeholder summary instead of the full content.
+        AgentTaskProcessor processor = new AgentTaskProcessor(
+                factoryReturning(devWritingArtifact("src/base.py", "# see repo: base.py")), repo, audit);
+        Task task = new Task(new TaskId("t1"), "Implement", "code it", AgentRole.BACKEND_DEVELOPER,
+                WorkflowState.PENDING, List.of(), Map.of(), Instant.now(), Instant.now());
+
+        processor.process("p1", task);
+
+        assertEquals(realSource, repo.read("src/base.py").orElseThrow(),
+                "a truncated artifact must not clobber the real, larger source file");
+        assertTrue(audit.all().stream().anyMatch(e ->
+                        e.type() == com.orchestration.audit.AuditLog.EventType.ERROR
+                                && e.summary().contains("Refused to overwrite")),
+                "the refused overwrite must surface a visible warning");
+    }
+
+    @Test
+    void stillWritesAGenuineNewFileAndAFullRewrite() {
+        JGitArtifactRepository repo = new JGitArtifactRepository(repoDir);
+        InMemoryAuditLog audit = new InMemoryAuditLog();
+        // New file: no prior content to protect, so it is written verbatim.
+        AgentTaskProcessor processor = new AgentTaskProcessor(
+                factoryReturning(devWritingArtifact("src/new.py", "print('hello world, a real file')")),
+                repo, audit);
+        Task task = new Task(new TaskId("t1"), "Implement", "code it", AgentRole.BACKEND_DEVELOPER,
+                WorkflowState.PENDING, List.of(), Map.of(), Instant.now(), Instant.now());
+
+        processor.process("p1", task);
+
+        assertEquals("print('hello world, a real file')", repo.read("src/new.py").orElseThrow());
+        assertFalse(audit.all().stream().anyMatch(e -> e.summary().contains("Refused to overwrite")),
+                "a genuine new file must not trip the overwrite guard");
+    }
+
+    @Test
+    void excludesDependencyAndCacheDirsFromTheProjectFilesGrounding() {
+        AtomicReference<Agent.Request> seen = new AtomicReference<>();
+        JGitArtifactRepository repo = new JGitArtifactRepository(repoDir);
+        repo.write(new ArtifactRepository.WriteRequest("seed", "BACKEND_DEVELOPER", "seed", List.of(
+                new ArtifactRepository.FileChange("src/app.py", "print('real source')"),
+                new ArtifactRepository.FileChange("node_modules/left-pad/index.js", "module.exports={}"),
+                new ArtifactRepository.FileChange(".venv/lib/site.py", "# vendored python"),
+                new ArtifactRepository.FileChange("__pycache__/app.cpython-311.pyc", "bytecode"),
+                new ArtifactRepository.FileChange("package-lock.json", "{ \"lock\": true }"))));
+
+        // LLM mode (agentsReadFilesDirectly=false) → file CONTENTS are inlined into grounding.
+        AgentTaskProcessor processor = new AgentTaskProcessor(
+                factoryReturning(capturingAgent(seen)), repo, new InMemoryAuditLog());
+        Task task = new Task(new TaskId("t1"), "QA", "verify", AgentRole.QA_ENGINEER,
+                WorkflowState.PENDING, List.of(), Map.of(), Instant.now(), Instant.now());
+
+        processor.process("p1", task);
+
+        String grounding = seen.get().inputArtifacts().getOrDefault("projectFiles", "");
+        assertTrue(grounding.contains("src/app.py"), "real source must be in the grounding");
+        assertFalse(grounding.contains("node_modules"), "node_modules must be excluded");
+        assertFalse(grounding.contains(".venv"), ".venv must be excluded");
+        assertFalse(grounding.contains("__pycache__"), "__pycache__ must be excluded");
+        assertFalse(grounding.contains("package-lock.json"), "lockfiles must be excluded");
+    }
+
     @Test
     void reworksWhenNeedsReviewThenAcceptsImprovedResult() {
         java.util.concurrent.atomic.AtomicInteger runs = new java.util.concurrent.atomic.AtomicInteger();

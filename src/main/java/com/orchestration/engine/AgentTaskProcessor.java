@@ -664,6 +664,37 @@ public class AgentTaskProcessor implements TaskProcessor {
      *  but bounded so a runaway output can't bloat every downstream prompt. */
     private static final int HANDOFF_MAX_CHARS = 12_000;
 
+    /** Dependency / build / cache directories that must never appear in the projectFiles grounding.
+     *  The repo's list() walks the whole working tree, so without this a single npm/pip install dumps
+     *  thousands of vendored files into every task — wasting tokens and pushing the real source past the
+     *  truncation cap. Matched as a path segment (e.g. ".venv/" or "node_modules/") so nesting is caught. */
+    private static final java.util.Set<String> GROUNDING_NOISE_DIRS = java.util.Set.of(
+            "node_modules", ".venv", "venv", "env", "__pycache__", ".pytest_cache", ".mypy_cache",
+            ".ruff_cache", ".tox", ".eggs", "build", "dist", "out", "target", ".gradle", ".idea",
+            ".vscode", ".vite", ".next", ".nuxt", ".svelte-kit", ".cache", "coverage", ".nyc_output",
+            "vendor", ".terraform", "bin", "obj", ".angular", ".parcel-cache");
+
+    /** Noise files that add bytes but no signal for a reviewer. */
+    private static final java.util.Set<String> GROUNDING_NOISE_FILES = java.util.Set.of(
+            ".ds_store", "thumbs.db", "package-lock.json", "yarn.lock", "pnpm-lock.yaml",
+            "poetry.lock", "cargo.lock", "composer.lock");
+
+    /** True when a repo path is dependency/build/cache noise that should be kept out of grounding. */
+    private static boolean isGroundingNoise(String path) {
+        if (path == null || path.isBlank()) {
+            return true;
+        }
+        for (String segment : path.split("/")) {
+            if (GROUNDING_NOISE_DIRS.contains(segment)
+                    || segment.endsWith(".egg-info") || segment.endsWith(".dist-info")) {
+                return true;
+            }
+        }
+        int slash = path.lastIndexOf('/');
+        String name = (slash >= 0 ? path.substring(slash + 1) : path).toLowerCase(java.util.Locale.ROOT);
+        return GROUNDING_NOISE_FILES.contains(name);
+    }
+
     /** Roles that review actual code and so need the real file contents, not just summaries. */
     private static boolean needsFileAccess(AgentRole role) {
         return role == AgentRole.CODE_REVIEWER || role == AgentRole.SECURITY_REVIEWER
@@ -706,7 +737,8 @@ public class AgentTaskProcessor implements TaskProcessor {
         List<String> files = new ArrayList<>();
         try {
             for (String path : repo(projectId).list("")) {
-                if (path.startsWith(".git/") || path.equals(".project/knowledge.md")) {
+                if (path.startsWith(".git/") || path.equals(".project/knowledge.md")
+                        || isGroundingNoise(path)) {
                     continue;
                 }
                 files.add(path);
@@ -735,7 +767,8 @@ public class AgentTaskProcessor implements TaskProcessor {
         int total = 0;
         try {
             for (String path : repository.list("")) {
-                if (path.startsWith(".git/") || path.equals(".project/knowledge.md")) {
+                if (path.startsWith(".git/") || path.equals(".project/knowledge.md")
+                        || isGroundingNoise(path)) {
                     continue;
                 }
                 Optional<String> content = repository.read(path);
@@ -847,13 +880,67 @@ public class AgentTaskProcessor implements TaskProcessor {
         if (response.artifacts().isEmpty()) {
             return;
         }
-        List<ArtifactRepository.FileChange> changes = response.artifacts().stream()
-                .map(a -> new ArtifactRepository.FileChange(a.path(), a.content()))
-                .toList();
+        ArtifactRepository repository = repo(projectId);
+        List<ArtifactRepository.FileChange> changes = new ArrayList<>();
+        for (var a : response.artifacts()) {
+            if (wouldClobberRealFile(repository, projectId, task, agent, a.path(), a.content())) {
+                continue; // dropped + warned below — never let a summary stub overwrite real source
+            }
+            changes.add(new ArtifactRepository.FileChange(a.path(), a.content()));
+        }
+        if (changes.isEmpty()) {
+            return;
+        }
         String suffix = attempt > 0 ? " (rework #" + attempt + ")" : "";
-        repo(projectId).write(new ArtifactRepository.WriteRequest(
+        repository.write(new ArtifactRepository.WriteRequest(
                 task.id().value(), agent.role().name(),
                 "[" + agent.role() + "] " + task.title() + suffix, changes));
+    }
+
+    /** Guard against the most damaging submit failure: an agent lists a file in {@code artifacts} with a
+     *  short placeholder ("see repo", "// unchanged", a one-line summary) instead of the full content,
+     *  and the verbatim write CLOBBERS real, working source with a stub. We refuse a write that would
+     *  shrink an existing non-trivial file by &gt;90%, or replace it with obvious placeholder text, and
+     *  emit a loud audit warning so the drop is never silent. A genuinely empty/new path is unaffected. */
+    private boolean wouldClobberRealFile(ArtifactRepository repository, String projectId, Task task,
+                                         Agent agent, String path, String incoming) {
+        String existing;
+        try {
+            existing = repository.read(path).orElse(null);
+        } catch (RuntimeException e) {
+            return false; // can't read the prior version → don't block the write
+        }
+        if (existing == null || existing.strip().length() < 200) {
+            return false; // new file, or prior content too small to be worth protecting
+        }
+        String body = incoming == null ? "" : incoming.strip();
+        boolean massiveShrink = body.length() < existing.strip().length() * 0.10;
+        boolean placeholder = body.length() < 200 && looksLikePlaceholder(body);
+        if (!massiveShrink && !placeholder) {
+            return false;
+        }
+        String why = placeholder ? "placeholder/summary text" : "a >90% shrink (" + body.length()
+                + " vs " + existing.strip().length() + " chars)";
+        String message = "⚠ Refused to overwrite " + path + " with " + why + " from " + agent.role()
+                + ". A truncated artifact would have clobbered real source — the existing file is kept. "
+                + "Re-submit with the FULL file content, or omit it from artifacts if you wrote it directly.";
+        audit(projectId, task, agent, AuditLog.EventType.ERROR, message,
+                Map.of("role", agent.role().name(), "detail", message, "path", path));
+        System.err.println("[artifacts] " + message + " (project " + projectId
+                + ", task " + task.id().value() + ")");
+        return true;
+    }
+
+    /** Heuristic: short artifact content that reads like a reference/summary rather than real code. */
+    private static boolean looksLikePlaceholder(String body) {
+        if (body.isBlank()) {
+            return true;
+        }
+        String lower = body.toLowerCase(java.util.Locale.ROOT);
+        return lower.contains("see repo") || lower.contains("see above") || lower.contains("unchanged")
+                || lower.contains("no change") || lower.contains("omitted") || lower.contains("as before")
+                || lower.contains("[truncated") || lower.contains("…") || lower.startsWith("// see")
+                || lower.startsWith("# see") || lower.equals("...") || lower.startsWith("placeholder");
     }
 
     private void audit(String projectId, Task task, Agent agent, AuditLog.EventType type, String summary) {
