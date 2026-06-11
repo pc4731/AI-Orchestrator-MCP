@@ -190,7 +190,7 @@ public class AgentTaskProcessor implements TaskProcessor {
 
         Map<String, Object> baseParams = new LinkedHashMap<>();
         baseParams.put("workingDir", dir(projectId));
-        baseParams.put("testCommand", defaultTestCommand);
+        baseParams.put("testCommand", detectedOrDefaultCommand(projectId));
         baseParams.putAll(task.metadata());
 
         // Collaboration: gather the outputs of this task's completed dependencies as grounding.
@@ -260,7 +260,12 @@ public class AgentTaskProcessor implements TaskProcessor {
         Agent.Response review = dispatch(projectId, task, reviewer, task.description(), grounding,
                 baseParams, "developers (reviewing their work)", "Reviewing for " + reviewer.role(), 0);
         if (review.outcome() != Agent.Outcome.NEEDS_REVIEW) {
-            return review; // no blocking findings — nothing to fix
+            // Non-blocking path: a clean review still may carry HIGH/MEDIUM findings that the
+            // reviewer chose not to block on. Those used to be advisory-only — dropped unless the
+            // next agent happened to notice them in grounding (a real hardening was nearly lost
+            // that way). Now they are dispatched to a developer as a remediation pass.
+            remediateAdvisoryFindings(projectId, task, reviewer, baseParams, upstream, review);
+            return review;
         }
         // The reviewer found blocking issues but its job is complete. If it didn't already supply a
         // corrected artifact, dispatch a developer to apply the fixes.
@@ -281,6 +286,76 @@ public class AgentTaskProcessor implements TaskProcessor {
         // The review is complete; the fix has been dispatched/applied. Don't re-run the reviewer.
         return new Agent.Response(Agent.Outcome.COMPLETED, review.structuredOutput(), review.artifacts(),
                 review.confidence(), review.assumptions(), Optional.empty());
+    }
+
+    /**
+     * Dispatch a developer to address a reviewer's non-blocking but severe (CRITICAL/HIGH/MEDIUM)
+     * findings, so they enter the work as a real task instead of riding along as advisory grounding.
+     * Skipped when the reviewer already supplied corrected artifacts, when no developer role is
+     * configured, or when the findings carry no severe items. Best-effort — never fails the review.
+     */
+    private void remediateAdvisoryFindings(String projectId, Task task, Agent reviewer,
+                                           Map<String, Object> baseParams, Map<String, String> upstream,
+                                           Agent.Response review) {
+        if (!review.artifacts().isEmpty()) {
+            return; // the reviewer already committed its own fixes
+        }
+        String severe = severeFindings(review);
+        if (severe.isBlank()) {
+            return;
+        }
+        AgentRole devRole = developerToFix(projectId, task);
+        if (!agentFactory.supports(devRole)) {
+            return;
+        }
+        try {
+            Agent developer = agentFactory.create(devRole);
+            Task fixTask = new Task(TaskId.random(), "Address review findings", task.description(),
+                    devRole, WorkflowState.IN_PROGRESS, List.of(), Map.of(), Instant.now(), Instant.now());
+            String fixInstructions = "A reviewer (" + reviewer.role() + ") approved the work but raised "
+                    + "findings that still must be addressed (CRITICAL/HIGH/MEDIUM). Apply the "
+                    + "remediations for real and return the corrected files as artifacts.\n\nFindings:\n"
+                    + severe;
+            Map<String, String> fixGrounding = new LinkedHashMap<>(upstream);
+            fixGrounding.put("reviewFindings", severe);
+            dispatch(projectId, fixTask, developer, fixInstructions, fixGrounding, baseParams,
+                    reviewer.role().name(),
+                    "Remediating non-blocking " + reviewer.role() + " findings by " + devRole, 1);
+        } catch (RuntimeException e) {
+            audit(projectId, task, reviewer, AuditLog.EventType.ERROR,
+                    "Advisory-finding remediation could not be dispatched: " + e, Map.of());
+        }
+    }
+
+    /** The CRITICAL/HIGH/MEDIUM items from a reviewer's output.findings, as developer-actionable
+     *  text; "" when there are none (or severities can't be recognized). */
+    private static String severeFindings(Agent.Response review) {
+        Object findings = review.structuredOutput().get("findings");
+        if (findings instanceof List<?> list) {
+            StringBuilder sb = new StringBuilder();
+            for (Object item : list) {
+                if (item instanceof Map<?, ?> m) {
+                    Object severity = m.get("severity");
+                    if (severity != null && isSevere(severity.toString())) {
+                        sb.append("- ").append(m).append('\n');
+                    }
+                }
+            }
+            return sb.toString().strip();
+        }
+        if (findings != null) {
+            String text = findings.toString();
+            // Free-text findings: only act when an explicit severity marker is present.
+            if (text.matches("(?s).*\\b(CRITICAL|HIGH|MEDIUM)\\b.*")) {
+                return text.strip();
+            }
+        }
+        return "";
+    }
+
+    private static boolean isSevere(String severity) {
+        String s = severity.strip().toUpperCase(java.util.Locale.ROOT);
+        return s.startsWith("CRITICAL") || s.startsWith("HIGH") || s.startsWith("MEDIUM");
     }
 
     /** Flatten a reviewer's findings (output.findings + escalationReason) into developer-actionable text. */
@@ -526,6 +601,22 @@ public class AgentTaskProcessor implements TaskProcessor {
         return defaultTestCommand;
     }
 
+    /**
+     * The test command derived from what is ACTUALLY in the workspace (gradle/maven/pytest/npm/…),
+     * falling back to the configured default only when nothing is recognized — e.g. a fresh, still
+     * empty workspace. Re-detected on every use because the workspace gains its marker files as the
+     * build progresses; a per-task {@code testCommand} in task metadata still wins over both.
+     */
+    private List<String> detectedOrDefaultCommand(String projectId) {
+        try {
+            return com.orchestration.verify.StackDetector
+                    .testCommand(java.nio.file.Path.of(dir(projectId)))
+                    .orElse(defaultTestCommand);
+        } catch (RuntimeException e) {
+            return defaultTestCommand; // never let detection break a task
+        }
+    }
+
     /** One agent invocation: audit the prompt, run it, commit any artifacts, audit the response. */
     private Agent.Response dispatch(String projectId, Task task, Agent agent, String instructions,
                                     Map<String, String> grounding, Map<String, Object> baseParams,
@@ -664,6 +755,9 @@ public class AgentTaskProcessor implements TaskProcessor {
      *  but bounded so a runaway output can't bloat every downstream prompt. */
     private static final int HANDOFF_MAX_CHARS = 12_000;
 
+    /** Cap on file paths enumerated in the projectFiles grounding; the agent lists the rest itself. */
+    private static final int FILE_LIST_MAX_ENTRIES = 150;
+
     /** Dependency / build / cache directories that must never appear in the projectFiles grounding.
      *  The repo's list() walks the whole working tree, so without this a single npm/pip install dumps
      *  thousands of vendored files into every task — wasting tokens and pushing the real source past the
@@ -708,16 +802,20 @@ public class AgentTaskProcessor implements TaskProcessor {
     }
 
     /** The "build it green before you submit" definition-of-done handed to a developer in MCP mode,
-     *  spelling out the repo location and the exact test command so the brain can actually run it. */
+     *  spelling out the repo location and the exact test command so the brain can actually run it.
+     *  The command is detected from the project's real stack (gradle/pytest/npm/…) — never a
+     *  hardcoded toolchain — with a per-task metadata override winning over detection. */
     private String buildBeforeSubmit(String projectId, Task task) {
-        Object cmd = task.metadata().getOrDefault("testCommand", defaultTestCommand);
+        Object cmd = task.metadata().getOrDefault("testCommand", detectedOrDefaultCommand(projectId));
         String command = cmd instanceof List<?> parts
                 ? String.join(" ", parts.stream().map(String::valueOf).toList())
                 : String.valueOf(cmd);
         String repoPath = java.nio.file.Path.of(dir(projectId)).toAbsolutePath().normalize().toString();
         return "Before you submit: build and test your work in " + repoPath + " by running `" + command
-                + "` and make sure it compiles and every test passes. If it fails, fix it first — do "
-                + "NOT submit a red build; that just bounces back as rework from QA.";
+                + "` and make sure it compiles and every test passes. If that command does not match "
+                + "the stack you are actually building (e.g. the project is still empty), run the "
+                + "stack's standard test command instead and name it in your summary. If it fails, fix "
+                + "it first — do NOT submit a red build; that just bounces back as rework from QA.";
     }
 
     /** Give a reviewer/QA the project files. When the agent can read the filesystem itself (MCP mode),
@@ -754,8 +852,15 @@ public class AgentTaskProcessor implements TaskProcessor {
                 "Review the REAL, current project files. They live in this repository on disk:\n")
                 .append(repoPath).append('\n')
                 .append("Open and read them directly with your tools (do NOT rely on summaries). Files:\n");
-        for (String f : files) {
+        // Bounded: a large project's full tree repeated into every task is pure token waste — the
+        // agent can list the directory itself for anything beyond the cap.
+        int shown = Math.min(files.size(), FILE_LIST_MAX_ENTRIES);
+        for (String f : files.subList(0, shown)) {
             sb.append("  - ").append(f).append('\n');
+        }
+        if (files.size() > shown) {
+            sb.append("  …and ").append(files.size() - shown)
+                    .append(" more — list the directory with your tools to see the rest.\n");
         }
         grounding.put("projectFiles", sb.toString().strip());
     }
@@ -875,6 +980,11 @@ public class AgentTaskProcessor implements TaskProcessor {
         return words >= 80 || (words >= 50 && hasCriteria);
     }
 
+    /** Artifact content meaning "I already wrote this file to disk with my own tools — commit what
+     *  is there." This is the blessed alternative to re-pasting full file bodies (token-heavy) or
+     *  omitting the file entirely (the orchestrator's record then misses the change). */
+    public static final String ON_DISK_MARKER = "<<on-disk>>";
+
     private void commitArtifacts(String projectId, Task task, Agent agent, Agent.Response response,
                                  int attempt) {
         if (response.artifacts().isEmpty()) {
@@ -883,10 +993,24 @@ public class AgentTaskProcessor implements TaskProcessor {
         ArtifactRepository repository = repo(projectId);
         List<ArtifactRepository.FileChange> changes = new ArrayList<>();
         for (var a : response.artifacts()) {
-            if (wouldClobberRealFile(repository, projectId, task, agent, a.path(), a.content())) {
+            String content = a.content();
+            if (content != null && content.strip().equalsIgnoreCase(ON_DISK_MARKER)) {
+                Optional<String> onDisk = readQuietly(repository, a.path());
+                if (onDisk.isEmpty()) {
+                    String message = "⚠ Artifact " + a.path() + " was marked " + ON_DISK_MARKER
+                            + " but no such file exists in the workspace — dropped. Write the file "
+                            + "first, or supply its full content.";
+                    audit(projectId, task, agent, AuditLog.EventType.ERROR, message,
+                            Map.of("role", agent.role().name(), "detail", message, "path", a.path()));
+                    continue;
+                }
+                changes.add(new ArtifactRepository.FileChange(a.path(), onDisk.get()));
+                continue;
+            }
+            if (wouldClobberRealFile(repository, projectId, task, agent, a.path(), content)) {
                 continue; // dropped + warned below — never let a summary stub overwrite real source
             }
-            changes.add(new ArtifactRepository.FileChange(a.path(), a.content()));
+            changes.add(new ArtifactRepository.FileChange(a.path(), content));
         }
         if (changes.isEmpty()) {
             return;
@@ -895,6 +1019,14 @@ public class AgentTaskProcessor implements TaskProcessor {
         repository.write(new ArtifactRepository.WriteRequest(
                 task.id().value(), agent.role().name(),
                 "[" + agent.role() + "] " + task.title() + suffix, changes));
+    }
+
+    private static Optional<String> readQuietly(ArtifactRepository repository, String path) {
+        try {
+            return repository.read(path);
+        } catch (RuntimeException e) {
+            return Optional.empty();
+        }
     }
 
     /** Guard against the most damaging submit failure: an agent lists a file in {@code artifacts} with a

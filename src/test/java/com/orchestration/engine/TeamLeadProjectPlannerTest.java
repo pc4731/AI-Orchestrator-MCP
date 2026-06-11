@@ -40,6 +40,40 @@ class TeamLeadProjectPlannerTest {
     }
 
     @Test
+    void qaGainsADependencyOnEveryDeliverableItAssertsAbout() {
+        // The retro-famous contradiction: QA hard-requires RUN.md, but the planner scheduled the
+        // RUN.md docs task parallel to (or after) QA. The planner must now gate QA on every
+        // deliverable, so it verifies the finished state, not a moving target.
+        Map<String, Object> dev = Map.of("id", "t1", "title", "Build", "role", "BACKEND_DEVELOPER",
+                "dependsOn", List.of());
+        Map<String, Object> qa = Map.of("id", "t2", "title", "Verify", "role", "QA_ENGINEER",
+                "dependsOn", List.of("t1"));
+        Map<String, Object> docs = Map.of("id", "t3", "title", "Write RUN.md",
+                "role", "FRONTEND_DEVELOPER", "dependsOn", List.of("t1"));
+        Map<String, Object> curator = Map.of("id", "t4", "title", "Record brief",
+                "role", "KNOWLEDGE_CURATOR", "dependsOn", List.of("t2", "t3"));
+        Agent.Response response = new Agent.Response(Agent.Outcome.COMPLETED,
+                Map.of("tasks", List.of(dev, qa, docs, curator)), List.of(),
+                Agent.Confidence.HIGH, List.of(), Optional.empty());
+
+        TaskGraph graph = new TeamLeadProjectPlanner(teamLeadReturning(response)).plan("p1",
+                new OrchestrationEngine.ProjectRequest("build a todo app",
+                        Map.of("rememberProject", "true"), Optional.empty()));
+
+        Task qaTask = graph.tasks().stream()
+                .filter(t -> t.assignedRole() == AgentRole.QA_ENGINEER).findFirst().orElseThrow();
+        Task docsTask = graph.tasks().stream()
+                .filter(t -> t.assignedRole() == AgentRole.FRONTEND_DEVELOPER).findFirst().orElseThrow();
+        Task curatorTask = graph.tasks().stream()
+                .filter(t -> t.assignedRole() == AgentRole.KNOWLEDGE_CURATOR).findFirst().orElseThrow();
+
+        assertTrue(graph.dependencies(qaTask.id()).contains(docsTask.id()),
+                "QA must run after the RUN.md docs task it asserts about");
+        assertTrue(graph.dependencies(curatorTask.id()).contains(qaTask.id()),
+                "the curator stays terminal — gating QA must not invert or break that edge");
+    }
+
+    @Test
     void buildsGraphFromDecompositionWithDependencies() {
         Map<String, Object> t1 = Map.of("id", "t1", "title", "Design", "role", "BACKEND_ARCHITECT",
                 "dependsOn", List.of());

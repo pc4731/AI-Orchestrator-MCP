@@ -853,4 +853,182 @@ class AgentTaskProcessorTest {
         assertTrue(fixRequest.get().inputArtifacts().get("buildFailure")
                 .contains("compile error: missing semicolon"));   // the failure reached the developer
     }
+
+    @Test
+    void detectedStackBeatsTheConfiguredDefaultTestCommand() throws java.io.IOException {
+        // The workspace is a Python project, but the configured default is gradle — the recurring
+        // retro complaint. The agent must be handed the DETECTED command, not the stale default.
+        java.nio.file.Files.writeString(repoDir.resolve("pyproject.toml"), "[project]\nname = \"x\"\n");
+        AtomicReference<Agent.Request> seen = new AtomicReference<>();
+        AgentTaskProcessor processor = new AgentTaskProcessor(
+                factoryReturning(capturingAgent(seen)),
+                new JGitArtifactRepository(repoDir), new InMemoryAuditLog(),
+                repoDir.toString(), List.of("./gradlew", "test"), 0);
+
+        Task task = new Task(new TaskId("t1"), "QA", "", AgentRole.QA_ENGINEER,
+                WorkflowState.PENDING, List.of(), Map.of(), Instant.now(), Instant.now());
+        processor.process("p1", task);
+
+        assertEquals(List.of("python3", "-m", "pytest"), seen.get().parameters().get("testCommand"));
+    }
+
+    @Test
+    void taskMetadataStillBeatsTheDetectedStack() throws java.io.IOException {
+        java.nio.file.Files.writeString(repoDir.resolve("pyproject.toml"), "[project]\nname = \"x\"\n");
+        AtomicReference<Agent.Request> seen = new AtomicReference<>();
+        AgentTaskProcessor processor = new AgentTaskProcessor(
+                factoryReturning(capturingAgent(seen)),
+                new JGitArtifactRepository(repoDir), new InMemoryAuditLog(),
+                repoDir.toString(), List.of("./gradlew", "test"), 0);
+
+        Task task = new Task(new TaskId("t1"), "QA", "", AgentRole.QA_ENGINEER,
+                WorkflowState.PENDING, List.of(), Map.of("testCommand", List.of("make", "check")),
+                Instant.now(), Instant.now());
+        processor.process("p1", task);
+
+        assertEquals(List.of("make", "check"), seen.get().parameters().get("testCommand"));
+    }
+
+    @Test
+    void onDiskMarkerCommitsTheFileAsItIsOnDisk() throws java.io.IOException {
+        JGitArtifactRepository repo = new JGitArtifactRepository(repoDir);
+        InMemoryAuditLog audit = new InMemoryAuditLog();
+        // The agent wrote the file with its own tools, then records it with the marker.
+        java.nio.file.Files.createDirectories(repoDir.resolve("src"));
+        java.nio.file.Files.writeString(repoDir.resolve("src/real.py"), "print('written by my tools')");
+
+        AgentTaskProcessor processor = new AgentTaskProcessor(
+                factoryReturning(devWritingArtifact("src/real.py", AgentTaskProcessor.ON_DISK_MARKER)),
+                repo, audit);
+        Task task = new Task(new TaskId("t1"), "Implement", "code it", AgentRole.BACKEND_DEVELOPER,
+                WorkflowState.PENDING, List.of(), Map.of(), Instant.now(), Instant.now());
+        processor.process("p1", task);
+
+        assertEquals("print('written by my tools')", repo.read("src/real.py").orElseThrow(),
+                "the marker must never be written as literal file content");
+        assertFalse(audit.all().stream().anyMatch(e ->
+                        e.type() == com.orchestration.audit.AuditLog.EventType.ERROR),
+                "recording an on-disk file is not an error");
+    }
+
+    @Test
+    void onDiskMarkerForAMissingFileIsDroppedWithAWarning() {
+        JGitArtifactRepository repo = new JGitArtifactRepository(repoDir);
+        InMemoryAuditLog audit = new InMemoryAuditLog();
+        AgentTaskProcessor processor = new AgentTaskProcessor(
+                factoryReturning(devWritingArtifact("ghost.py", AgentTaskProcessor.ON_DISK_MARKER)),
+                repo, audit);
+        Task task = new Task(new TaskId("t1"), "Implement", "code it", AgentRole.BACKEND_DEVELOPER,
+                WorkflowState.PENDING, List.of(), Map.of(), Instant.now(), Instant.now());
+        processor.process("p1", task);
+
+        assertTrue(repo.read("ghost.py").isEmpty(), "the marker itself must never reach disk");
+        assertTrue(audit.all().stream().anyMatch(e ->
+                        e.type() == com.orchestration.audit.AuditLog.EventType.ERROR
+                                && e.summary().contains("<<on-disk>>")),
+                "a marker for a nonexistent file must surface a visible warning");
+    }
+
+    @Test
+    void advisorySevereFindingsDispatchADeveloperRemediation() {
+        // The reviewer APPROVES (no blocking issues) but raises a MEDIUM finding. Previously that
+        // finding was advisory-only and silently dropped; now a developer remediation is dispatched.
+        Agent reviewer = new Agent() {
+            @Override public AgentId id() { return new AgentId("rev"); }
+            @Override public AgentRole role() { return AgentRole.SECURITY_REVIEWER; }
+            @Override public Set<Capability> capabilities() { return Set.of(Capability.REVIEW_CODE); }
+            @Override public boolean canHandle(Task task) { return true; }
+            @Override public Response handle(Request request, Context context) {
+                return new Response(Outcome.COMPLETED,
+                        Map.of("findings", List.of(
+                                Map.of("issue", "agentic CLI can run host tools", "severity", "MEDIUM",
+                                        "remediation", "pass an empty --allowed-tools list"),
+                                Map.of("issue", "nit: rename var", "severity", "LOW"))),
+                        List.of(), Confidence.HIGH, List.of(), Optional.empty());
+            }
+        };
+        java.util.concurrent.atomic.AtomicInteger devRuns = new java.util.concurrent.atomic.AtomicInteger();
+        AtomicReference<Agent.Request> devReq = new AtomicReference<>();
+        Agent developer = new Agent() {
+            @Override public AgentId id() { return new AgentId("dev"); }
+            @Override public AgentRole role() { return AgentRole.BACKEND_DEVELOPER; }
+            @Override public Set<Capability> capabilities() { return Set.of(Capability.WRITE_CODE); }
+            @Override public boolean canHandle(Task task) { return true; }
+            @Override public Response handle(Request request, Context context) {
+                devRuns.incrementAndGet();
+                devReq.set(request);
+                return new Response(Outcome.COMPLETED, Map.of("summary", "hardened"),
+                        List.of(), Confidence.HIGH, List.of(), Optional.empty());
+            }
+        };
+        AgentFactory factory = new AgentFactory() {
+            @Override public Agent create(AgentRole role) {
+                return role == AgentRole.SECURITY_REVIEWER ? reviewer : developer;
+            }
+            @Override public boolean supports(AgentRole role) {
+                return role == AgentRole.SECURITY_REVIEWER || role == AgentRole.BACKEND_DEVELOPER;
+            }
+            @Override public Set<AgentRole> supportedRoles() {
+                return Set.of(AgentRole.SECURITY_REVIEWER, AgentRole.BACKEND_DEVELOPER);
+            }
+        };
+        AgentTaskProcessor processor = new AgentTaskProcessor(
+                factory, new JGitArtifactRepository(repoDir), new InMemoryAuditLog());
+
+        Agent.Response r = processor.process("p1", new Task(new TaskId("rv1"), "Security review",
+                "audit", AgentRole.SECURITY_REVIEWER, WorkflowState.PENDING, List.of(), Map.of(),
+                Instant.now(), Instant.now()));
+
+        assertEquals(Agent.Outcome.COMPLETED, r.outcome(), "the review outcome is unchanged");
+        assertEquals(1, devRuns.get(), "a developer must be dispatched for the MEDIUM finding");
+        String findings = devReq.get().inputArtifacts().getOrDefault("reviewFindings", "");
+        assertTrue(findings.contains("agentic CLI"), "the severe finding reaches the developer");
+        assertFalse(findings.contains("rename var"), "LOW-only nits are not dispatched");
+    }
+
+    @Test
+    void cleanReviewWithOnlyLowFindingsDispatchesNoDeveloper() {
+        Agent reviewer = new Agent() {
+            @Override public AgentId id() { return new AgentId("rev"); }
+            @Override public AgentRole role() { return AgentRole.CODE_REVIEWER; }
+            @Override public Set<Capability> capabilities() { return Set.of(Capability.REVIEW_CODE); }
+            @Override public boolean canHandle(Task task) { return true; }
+            @Override public Response handle(Request request, Context context) {
+                return new Response(Outcome.COMPLETED,
+                        Map.of("findings", List.of(Map.of("issue", "nit", "severity", "LOW"))),
+                        List.of(), Confidence.HIGH, List.of(), Optional.empty());
+            }
+        };
+        java.util.concurrent.atomic.AtomicInteger devRuns = new java.util.concurrent.atomic.AtomicInteger();
+        Agent developer = new Agent() {
+            @Override public AgentId id() { return new AgentId("dev"); }
+            @Override public AgentRole role() { return AgentRole.BACKEND_DEVELOPER; }
+            @Override public Set<Capability> capabilities() { return Set.of(Capability.WRITE_CODE); }
+            @Override public boolean canHandle(Task task) { return true; }
+            @Override public Response handle(Request request, Context context) {
+                devRuns.incrementAndGet();
+                return new Response(Outcome.COMPLETED, Map.of(), List.of(),
+                        Confidence.HIGH, List.of(), Optional.empty());
+            }
+        };
+        AgentFactory factory = new AgentFactory() {
+            @Override public Agent create(AgentRole role) {
+                return role == AgentRole.CODE_REVIEWER ? reviewer : developer;
+            }
+            @Override public boolean supports(AgentRole role) {
+                return role == AgentRole.CODE_REVIEWER || role == AgentRole.BACKEND_DEVELOPER;
+            }
+            @Override public Set<AgentRole> supportedRoles() {
+                return Set.of(AgentRole.CODE_REVIEWER, AgentRole.BACKEND_DEVELOPER);
+            }
+        };
+        AgentTaskProcessor processor = new AgentTaskProcessor(
+                factory, new JGitArtifactRepository(repoDir), new InMemoryAuditLog());
+
+        processor.process("p1", new Task(new TaskId("rv1"), "Review", "review",
+                AgentRole.CODE_REVIEWER, WorkflowState.PENDING, List.of(), Map.of(),
+                Instant.now(), Instant.now()));
+
+        assertEquals(0, devRuns.get(), "LOW-only findings must not trigger a remediation pass");
+    }
 }

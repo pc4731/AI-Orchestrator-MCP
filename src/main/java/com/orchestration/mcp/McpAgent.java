@@ -256,9 +256,10 @@ public class McpAgent implements Agent {
                             + "code/markup; never fake the result with a screenshot, a background image, "
                             + "a stub, or placeholder text. Meet every acceptance criterion in the "
                             + "refined prompt. Return every file you create or change in the artifacts "
-                            + "array (repository-relative path + full content), INCLUDING test files that "
-                            + "cover each feature (happy path + key edge cases) and run under the "
-                            + "project's standard test command. The project MUST build and the tests MUST "
+                            + "array (repository-relative path + full content — or content \"<<on-disk>>\" "
+                            + "for files you already wrote to disk with your own tools), INCLUDING test "
+                            + "files that cover each feature (happy path + key edge cases) and run under "
+                            + "the project's standard test command. The project MUST build and the tests MUST "
                             + "pass before you report COMPLETED — if a build error (provided as the "
                             + "buildFailure grounding) is given, fix it for real and return the corrected "
                             + "files. When asked to write run instructions, produce a RUN.md at the repo "
@@ -333,11 +334,18 @@ public class McpAgent implements Agent {
                 {"status":"COMPLETED|NEEDS_REVIEW|ESCALATE|INSUFFICIENT_INFORMATION|FAILED",
                  "confidence":"LOW|MEDIUM|HIGH","assumptions":["..."],"output":{...},
                  "artifacts":[{"path":"relative/path","content":"file contents"}],
-                 "escalationReason":"only when you cannot proceed"}""";
+                 "escalationReason":"only when you cannot proceed"}
+                Artifact contract: content is written to disk VERBATIM, so never paste a placeholder,
+                summary, or partial body. If you already wrote a file to disk with your own tools, list
+                it with content exactly "<<on-disk>>" — the orchestrator then commits the file as it is
+                on disk, so the change is recorded without re-pasting it.""";
         if (role == AgentRole.TEAM_LEAD) {
             return base + "\nFor decomposition, put tasks in output.tasks: "
                     + "[{\"id\":\"t1\",\"title\":\"...\",\"description\":\"...\","
                     + "\"role\":\"BACKEND_ARCHITECT\",\"dependsOn\":[\"t0\"]}] "
+                    + "A task may also set \"testCommand\":[\"npm\",\"test\"] — the exact build/test "
+                    + "command for the stack you chose (e.g. [\"python3\",\"-m\",\"pytest\"]); set it on "
+                    + "developer and QA tasks so nobody is handed a wrong-toolchain command. "
                     + "(roles: TEAM_LEAD, MARKET_RESEARCHER, BACKEND_ARCHITECT, FRONTEND_ARCHITECT, "
                     + "AI_ML_ARCHITECT, UI_DESIGNER, BACKEND_DEVELOPER, FRONTEND_DEVELOPER, "
                     + "AI_ML_DEVELOPER, QA_ENGINEER, DBA, SECURITY_REVIEWER, CODE_REVIEWER, "

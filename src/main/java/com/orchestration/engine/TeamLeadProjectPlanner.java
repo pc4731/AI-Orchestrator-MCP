@@ -112,8 +112,16 @@ public class TeamLeadProjectPlanner implements ProjectPlanner {
         String specification = clarified.specification();
 
         // 3) Team Lead decomposes the AGREED request + spec + research into a task graph.
+        // The agreed spec — not the raw request — is the prominent planning text: after a mid-run
+        // scope correction the spec is the live scope, and planning from the stale request text is
+        // how discarded briefs end up as every downstream task's description.
+        String planningInstructions = specification.isBlank()
+                ? request.featureRequest()
+                : "Plan against this AGREED specification. It is the live scope and supersedes the "
+                        + "original request wherever they differ:\n" + specification
+                        + "\n\nOriginal request (context only):\n" + request.featureRequest();
         Agent teamLead = agentFactory.create(AgentRole.TEAM_LEAD);
-        Task planningTask = newTask(TaskId.random(), "Plan project", request.featureRequest(), AgentRole.TEAM_LEAD);
+        Task planningTask = newTask(TaskId.random(), "Plan project", planningInstructions, AgentRole.TEAM_LEAD);
         Map<String, String> grounding = new HashMap<>();
         if (!priorKnowledge.isBlank()) {
             grounding.put("projectKnowledge", priorKnowledge);
@@ -145,10 +153,10 @@ public class TeamLeadProjectPlanner implements ProjectPlanner {
         planAudit(projectId, AgentRole.TEAM_LEAD.name(), AuditLog.EventType.PROMPT,
                 "TEAM_LEAD decomposing the request into tasks",
                 Map.of("role", "TEAM_LEAD", "collaborator", "BUSINESS_ANALYST",
-                        "prompt", request.featureRequest()));
+                        "prompt", planningInstructions));
 
         Agent.Response response = teamLead.handle(
-                new Agent.Request(planningTask, request.featureRequest(), grounding, Map.of()),
+                new Agent.Request(planningTask, planningInstructions, grounding, Map.of()),
                 new Agent.Context(projectId, planningTask.id().value(), Map.of()));
 
         InMemoryTaskGraph graph = new InMemoryTaskGraph();
@@ -196,7 +204,37 @@ public class TeamLeadProjectPlanner implements ProjectPlanner {
                 }
             }
         }
+        gateQaOnAllDeliverables(graph);
         return graph;
+    }
+
+    /**
+     * Verification runs last: every QA task gains a dependency on every other non-QA task (the
+     * knowledge curator stays terminal), so QA never asserts about a deliverable — RUN.md, deploy
+     * config, copy — that the plan schedules after it. Real runs hit exactly that contradiction:
+     * QA hard-requires RUN.md while the planner put the RUN.md task downstream of QA, forcing a
+     * scheduling-only NEEDS_REVIEW → fix → re-QA cycle. Edges that would close a cycle (a task the
+     * Team Lead deliberately placed after QA) are skipped; existing edges are idempotent.
+     */
+    private static void gateQaOnAllDeliverables(InMemoryTaskGraph graph) {
+        List<Task> all = List.copyOf(graph.tasks());
+        for (Task qa : all) {
+            if (qa.assignedRole() != AgentRole.QA_ENGINEER) {
+                continue;
+            }
+            for (Task other : all) {
+                if (other.id().equals(qa.id())
+                        || other.assignedRole() == AgentRole.QA_ENGINEER
+                        || other.assignedRole() == AgentRole.KNOWLEDGE_CURATOR) {
+                    continue;
+                }
+                try {
+                    graph.addDependency(qa.id(), other.id());
+                } catch (IllegalStateException cycleOrInvalid) {
+                    // the other task (transitively) depends on QA — leave it downstream
+                }
+            }
+        }
     }
 
     /**
