@@ -3,8 +3,11 @@ package com.orchestration.engine;
 import com.orchestration.agent.Agent;
 import com.orchestration.agent.AgentFactory;
 import com.orchestration.agent.AgentRole;
+import com.orchestration.agent.SkillRegistry;
 import com.orchestration.audit.AuditLog;
 import com.orchestration.knowledge.ProjectKnowledgeStore;
+import com.orchestration.phase.PhasePlan;
+import com.orchestration.phase.PhasePlanStore;
 import com.orchestration.workspace.ProjectWorkspaces;
 import com.orchestration.task.InMemoryTaskGraph;
 import com.orchestration.task.Task;
@@ -42,6 +45,9 @@ public class TeamLeadProjectPlanner implements ProjectPlanner {
     // Optional: when present, every project gets its OWN workspace (dir + repo + knowledge), opened
     // here at planning time before any task runs. When null, the legacy single shared repo is used.
     private final ProjectWorkspaces workspaces;
+    // Optional: lets the Skill Smith persist an approved, researched domain skill mid-run so later
+    // agents in THIS run (and future runs) pick it up. Null disables just-in-time skill synthesis.
+    private final SkillRegistry skills;
 
     public TeamLeadProjectPlanner(AgentFactory agentFactory) {
         this(agentFactory, null, null, null);
@@ -64,11 +70,18 @@ public class TeamLeadProjectPlanner implements ProjectPlanner {
     public TeamLeadProjectPlanner(AgentFactory agentFactory, AuditLog auditLog,
                                   ClarificationGateway clarifier, ProjectKnowledgeStore knowledgeStore,
                                   ProjectWorkspaces workspaces) {
+        this(agentFactory, auditLog, clarifier, knowledgeStore, workspaces, null);
+    }
+
+    public TeamLeadProjectPlanner(AgentFactory agentFactory, AuditLog auditLog,
+                                  ClarificationGateway clarifier, ProjectKnowledgeStore knowledgeStore,
+                                  ProjectWorkspaces workspaces, SkillRegistry skills) {
         this.agentFactory = Objects.requireNonNull(agentFactory, "agentFactory");
         this.auditLog = auditLog;
         this.clarifier = clarifier;
         this.knowledgeStore = knowledgeStore;
         this.workspaces = workspaces;
+        this.skills = skills;
     }
 
     /** The result of the clarification loop: the agreed spec plus the accumulated Q&amp;A trail. */
@@ -111,6 +124,17 @@ public class TeamLeadProjectPlanner implements ProjectPlanner {
         Clarified clarified = clarifyRequirements(projectId, request, marketResearch, priorKnowledge);
         String specification = clarified.specification();
 
+        // 2.4) Just-in-time skills: if this build needs specialised domain expertise the team has no
+        //      skill for, the Skill Smith researches it and proposes a tight skill; the user approves
+        //      it here, BEFORE any build agent is created, so the approved skill is on disk and every
+        //      downstream agent this run (and future runs) picks it up.
+        synthesizeSkills(projectId, request, specification, priorKnowledge);
+
+        // 2.5) Phase-based development: for a big build the Phase Planner lays out an ordered roadmap
+        //      (persisted in the repo so a future session knows what's done/pending); a continuation
+        //      run advances to the next pending phase. Either way the Team Lead is scoped to ONE phase.
+        Phasing phasing = resolvePhasing(projectId, request, specification, priorKnowledge);
+
         // 3) Team Lead decomposes the AGREED request + spec + research into a task graph.
         // The agreed spec — not the raw request — is the prominent planning text: after a mid-run
         // scope correction the spec is the live scope, and planning from the stale request text is
@@ -120,6 +144,12 @@ public class TeamLeadProjectPlanner implements ProjectPlanner {
                 : "Plan against this AGREED specification. It is the live scope and supersedes the "
                         + "original request wherever they differ:\n" + specification
                         + "\n\nOriginal request (context only):\n" + request.featureRequest();
+        // A phased run scopes the Team Lead to the current phase only — make that the prominent
+        // instruction so the slice isn't buried in grounding (a real failure mode the retros flagged).
+        if (phasing.currentPhase() != null) {
+            planningInstructions = "Build ONLY " + phasing.currentPhaseHeadline()
+                    + ". The full roadmap is context; do NOT build later phases.\n\n" + planningInstructions;
+        }
         Agent teamLead = agentFactory.create(AgentRole.TEAM_LEAD);
         Task planningTask = newTask(TaskId.random(), "Plan project", planningInstructions, AgentRole.TEAM_LEAD);
         Map<String, String> grounding = new HashMap<>();
@@ -138,6 +168,17 @@ public class TeamLeadProjectPlanner implements ProjectPlanner {
         // Tell the Team Lead whether to bother planning a knowledge-capture task (it is also
         // enforced below by stripping any curator task when remembering is off).
         grounding.put("rememberProject", Boolean.toString(rememberProject));
+        // Phase-based build: show the roadmap (done/now/later) and scope the Team Lead to the
+        // in-progress phase.
+        if (!phasing.roadmap().isBlank()) {
+            grounding.put("phasePlan", phasing.roadmap());
+        }
+        if (phasing.currentPhase() != null) {
+            grounding.put("currentPhase", "You are building PHASE " + phasing.currentPhase().number()
+                    + ": " + phasing.currentPhase().headline() + ". Plan ONLY the tasks needed to ship "
+                    + "THIS phase; earlier phases are already built (see phasePlan) and later phases are "
+                    + "built in their own runs.");
+        }
         // Edit run: tell the Team Lead to MODIFY the existing project, and show it the current files so
         // it plans changes to real code instead of a greenfield rebuild.
         if (editMode) {
@@ -225,8 +266,9 @@ public class TeamLeadProjectPlanner implements ProjectPlanner {
             for (Task other : all) {
                 if (other.id().equals(qa.id())
                         || other.assignedRole() == AgentRole.QA_ENGINEER
+                        || other.assignedRole() == AgentRole.RUNTIME_VERIFIER
                         || other.assignedRole() == AgentRole.KNOWLEDGE_CURATOR) {
-                    continue;
+                    continue; // the runtime verifier and curator run AFTER QA, never gate it
                 }
                 try {
                     graph.addDependency(qa.id(), other.id());
@@ -502,6 +544,273 @@ public class TeamLeadProjectPlanner implements ProjectPlanner {
     }
 
     @SuppressWarnings("unchecked")
+    /** The phase context for this run: the roadmap to show the Team Lead, and the one phase (if any)
+     *  it should build now. {@code currentPhase} null means a normal, non-phased build. */
+    private record Phasing(String roadmap, PhasePlan.Phase currentPhase) {
+        static Phasing none() {
+            return new Phasing("", null);
+        }
+
+        String currentPhaseHeadline() {
+            return currentPhase == null ? "" : "phase " + currentPhase.number() + ": "
+                    + currentPhase.headline();
+        }
+    }
+
+    /**
+     * Work out the phase context. A continuation run (a project that already has a committed phase
+     * plan) advances to the next not-done phase and marks it in progress. A fresh build asks the
+     * Phase Planner for a roadmap only when {@code phased} was requested. The plan is persisted in the
+     * repo, so a brand-new session sees exactly what is done and what is pending. Best-effort —
+     * phasing never crashes planning.
+     */
+    private Phasing resolvePhasing(String projectId, OrchestrationEngine.ProjectRequest request,
+                                   String specification, String priorKnowledge) {
+        if (workspaces == null) {
+            return Phasing.none();
+        }
+        PhasePlanStore store;
+        try {
+            store = new PhasePlanStore(workspaces.get(projectId).repository());
+        } catch (RuntimeException e) {
+            return Phasing.none();
+        }
+        try {
+            Optional<PhasePlan> existing = store.load();
+            if (existing.isPresent()) {
+                PhasePlan plan = existing.get();
+                // Only ADVANCE the roadmap when this run explicitly continues the phases
+                // (orchestrate_phases build=true). A plain orchestrate_edit on a phased project must
+                // NOT consume a phase — it just gets the roadmap as read-only context.
+                if (!isPhaseContinue(request) && !isPhased(request)) {
+                    return new Phasing(plan.groundingText(), null);
+                }
+                Optional<PhasePlan.Phase> next = plan.nextPending();
+                if (next.isEmpty()) {
+                    return new Phasing(plan.groundingText(), null); // every phase already shipped
+                }
+                PhasePlan advanced = plan.withStatus(next.get().number(), PhasePlan.Status.IN_PROGRESS);
+                store.save(advanced, null, AgentRole.PHASE_PLANNER.name());
+                return new Phasing(advanced.groundingText(),
+                        next.get().withStatus(PhasePlan.Status.IN_PROGRESS));
+            }
+            if (!isPhased(request)) {
+                return Phasing.none(); // a normal, single-shot build
+            }
+            PhasePlan planned = runPhasePlanner(projectId, request, specification, priorKnowledge);
+            if (planned == null || planned.phases().isEmpty()) {
+                return Phasing.none();
+            }
+            int first = planned.phases().get(0).number();
+            PhasePlan started = planned.withStatus(first, PhasePlan.Status.IN_PROGRESS);
+            store.save(started, null, AgentRole.PHASE_PLANNER.name());
+            return new Phasing(started.groundingText(), started.phases().get(0));
+        } catch (RuntimeException e) {
+            return Phasing.none();
+        }
+    }
+
+    /** True when this run opted into phase-based development (orchestrate_start phased=true). */
+    private static boolean isPhased(OrchestrationEngine.ProjectRequest request) {
+        Object flag = request.options().get("phased");
+        return Boolean.TRUE.equals(flag) || "true".equalsIgnoreCase(String.valueOf(flag));
+    }
+
+    /** True when this run continues a phased project's roadmap (orchestrate_phases build=true). */
+    private static boolean isPhaseContinue(OrchestrationEngine.ProjectRequest request) {
+        Object flag = request.options().get("phaseContinue");
+        return Boolean.TRUE.equals(flag) || "true".equalsIgnoreCase(String.valueOf(flag));
+    }
+
+    /** One Phase Planner pass: turn the agreed scope into an ordered roadmap of shippable phases. */
+    private PhasePlan runPhasePlanner(String projectId, OrchestrationEngine.ProjectRequest request,
+                                      String specification, String priorKnowledge) {
+        if (!agentFactory.supports(AgentRole.PHASE_PLANNER)) {
+            return null;
+        }
+        String input = specification.isBlank() ? request.featureRequest() : specification;
+        Agent planner = agentFactory.create(AgentRole.PHASE_PLANNER);
+        Task task = newTask(TaskId.random(), "Plan phases", input, AgentRole.PHASE_PLANNER);
+        Map<String, String> grounding = new HashMap<>();
+        if (!priorKnowledge.isBlank()) {
+            grounding.put("projectKnowledge", priorKnowledge);
+        }
+        if (!specification.isBlank()) {
+            grounding.put("specification", specification);
+        }
+        planAudit(projectId, AgentRole.PHASE_PLANNER.name(), AuditLog.EventType.PROMPT,
+                "PHASE_PLANNER breaking the project into shippable phases",
+                Map.of("role", "PHASE_PLANNER", "collaborator", "TEAM_LEAD", "prompt", input));
+        Agent.Response r = planner.handle(
+                new Agent.Request(task, input, grounding, Map.of()),
+                new Agent.Context(projectId, task.id().value(), Map.of()));
+        List<PhasePlan.Phase> phases = extractPhases(r);
+        if (phases.isEmpty()) {
+            return null;
+        }
+        List<String> titles = new ArrayList<>();
+        for (PhasePlan.Phase p : phases) {
+            titles.add(p.number() + ". " + p.title());
+        }
+        planAudit(projectId, AgentRole.PHASE_PLANNER.name(), AuditLog.EventType.RESPONSE,
+                "PHASE_PLANNER produced a " + phases.size() + "-phase roadmap",
+                Map.of("role", "PHASE_PLANNER", "detail", trim(String.join("; ", titles))));
+        return new PhasePlan(request.featureRequest(), phases);
+    }
+
+    /** Parse the Phase Planner's {@code output.phases} into an ordered, all-pending phase list. */
+    private List<PhasePlan.Phase> extractPhases(Agent.Response response) {
+        List<PhasePlan.Phase> phases = new ArrayList<>();
+        Object raw = response.structuredOutput().get("phases");
+        if (!(raw instanceof List<?> list)) {
+            return phases;
+        }
+        int number = 1;
+        for (Object item : list) {
+            if (item instanceof Map<?, ?> map) {
+                String title = asString(map.get("title"), "").strip();
+                String description = asString(map.get("description"), "").strip();
+                if (title.isBlank() && description.isBlank()) {
+                    continue;
+                }
+                if (title.isBlank()) {
+                    title = description;
+                    description = "";
+                }
+                phases.add(new PhasePlan.Phase(number++, title, description, PhasePlan.Status.PENDING));
+            } else if (item != null && !item.toString().isBlank()) {
+                phases.add(new PhasePlan.Phase(number++, item.toString().strip(), "",
+                        PhasePlan.Status.PENDING));
+            }
+        }
+        return phases;
+    }
+
+    /** A domain skill the Skill Smith proposes, pending the user's approval. */
+    private record ProposedSkill(String name, String content, List<AgentRole> roles) {}
+
+    /**
+     * Run the Skill Smith to research any domain gap, then APPROVAL-GATE its proposals with the user
+     * before persisting them. Approved skills are written + attached so later agents this run use them.
+     * Disabled (no-op) without a SkillRegistry, a ClarificationGateway (no approval channel → never
+     * attach unreviewed guidance), or a SKILL_SMITH agent. Best-effort: never crashes planning.
+     */
+    private void synthesizeSkills(String projectId, OrchestrationEngine.ProjectRequest request,
+                                  String specification, String priorKnowledge) {
+        if (skills == null || clarifier == null || !agentFactory.supports(AgentRole.SKILL_SMITH)) {
+            return;
+        }
+        try {
+            String input = specification.isBlank() ? request.featureRequest() : specification;
+            Agent smith = agentFactory.create(AgentRole.SKILL_SMITH);
+            Task task = newTask(TaskId.random(), "Research domain skills", input, AgentRole.SKILL_SMITH);
+            Map<String, String> grounding = new HashMap<>();
+            if (!priorKnowledge.isBlank()) {
+                grounding.put("projectKnowledge", priorKnowledge);
+            }
+            if (!specification.isBlank()) {
+                grounding.put("specification", specification);
+            }
+            grounding.put("existingSkills", String.join(", ", skills.available()));
+            planAudit(projectId, AgentRole.SKILL_SMITH.name(), AuditLog.EventType.PROMPT,
+                    "SKILL_SMITH checking for a domain-skill gap",
+                    Map.of("role", "SKILL_SMITH", "collaborator", "user", "prompt", input));
+            Agent.Response r = smith.handle(
+                    new Agent.Request(task, input, grounding, Map.of()),
+                    new Agent.Context(projectId, task.id().value(), Map.of()));
+            List<ProposedSkill> proposed = extractSkills(r);
+            if (proposed.isEmpty()) {
+                return; // ordinary project — no domain skill needed
+            }
+            approveAndPersistSkills(projectId, proposed);
+        } catch (RuntimeException e) {
+            // never let skill synthesis crash planning
+        }
+    }
+
+    /** Parse the Skill Smith's {@code output.skills} into proposals; a skill attached to no known
+     *  role, or with a blank name/body, is dropped. */
+    private List<ProposedSkill> extractSkills(Agent.Response response) {
+        List<ProposedSkill> out = new ArrayList<>();
+        Object raw = response.structuredOutput().get("skills");
+        if (!(raw instanceof List<?> list)) {
+            return out;
+        }
+        for (Object item : list) {
+            if (!(item instanceof Map<?, ?> map)) {
+                continue;
+            }
+            String name = asString(map.get("name"), "").strip();
+            String content = asString(map.get("content"), "").strip();
+            if (name.isBlank() || content.isBlank()) {
+                continue;
+            }
+            List<AgentRole> roles = new ArrayList<>();
+            for (Object ro : asList(map.get("roles"))) {
+                try {
+                    roles.add(AgentRole.valueOf(String.valueOf(ro).trim().toUpperCase()));
+                } catch (IllegalArgumentException ignored) {
+                    // skip unknown role names
+                }
+            }
+            if (!roles.isEmpty()) {
+                out.add(new ProposedSkill(name, content, roles));
+            }
+        }
+        return out;
+    }
+
+    /** Present the proposed skills to the user and persist only the ones they approve. */
+    private void approveAndPersistSkills(String projectId, List<ProposedSkill> proposed) {
+        StringBuilder q = new StringBuilder("The team researched domain skills this build may need and "
+                + "proposes adding them (each guides the listed roles for this build and future ones):\n");
+        for (ProposedSkill s : proposed) {
+            List<String> roleNames = s.roles().stream().map(AgentRole::name).toList();
+            q.append("\n- ").append(s.name()).append(" → ").append(String.join(", ", roleNames))
+                    .append("\n  ").append(firstLine(s.content()));
+        }
+        q.append("\n\nApprove which to add? Reply 'approve' to add all, 'reject' to add none, or name "
+                + "the specific skills to add.");
+        Optional<String> answer = clarifier.ask(projectId, List.of(q.toString()), "domain-skill approval");
+        List<ProposedSkill> approved = decideApproved(proposed, answer.orElse(""));
+        for (ProposedSkill s : approved) {
+            String slug = skills.addSynthesizedSkill(s.name(), s.content(), s.roles());
+            if (!slug.isBlank()) {
+                planAudit(projectId, AgentRole.SKILL_SMITH.name(), AuditLog.EventType.STATE_CHANGE,
+                        "Approved domain skill '" + slug + "' attached to " + s.roles(),
+                        Map.of("role", "SKILL_SMITH", "detail", slug + " → " + s.roles()));
+            }
+        }
+    }
+
+    /** Interpret the user's free-text approval: explicit rejection → none; named skills → those; an
+     *  affirmative → all; anything unclear → none (never attach unreviewed guidance). */
+    private static List<ProposedSkill> decideApproved(List<ProposedSkill> proposed, String answer) {
+        String a = answer == null ? "" : answer.toLowerCase().strip();
+        if (a.isBlank() || a.contains("reject") || a.contains("none") || a.equals("no")
+                || a.startsWith("no ") || a.contains("don't") || a.contains("do not")) {
+            return List.of();
+        }
+        List<ProposedSkill> named = proposed.stream()
+                .filter(s -> a.contains(s.name().toLowerCase())).toList();
+        if (!named.isEmpty()) {
+            return named;
+        }
+        boolean affirmative = a.contains("approve") || a.contains("all") || a.contains("yes")
+                || a.equals("ok") || a.contains("add them") || a.contains("go ahead");
+        return affirmative ? proposed : List.of();
+    }
+
+    private static String firstLine(String content) {
+        for (String line : content.split("\n")) {
+            String t = line.strip();
+            if (!t.isBlank()) {
+                return t.length() <= 140 ? t : t.substring(0, 140) + "…";
+            }
+        }
+        return "";
+    }
+
     private List<Map<String, Object>> extractTasks(Agent.Response response) {
         Object tasks = response.structuredOutput().get("tasks");
         List<Map<String, Object>> result = new ArrayList<>();

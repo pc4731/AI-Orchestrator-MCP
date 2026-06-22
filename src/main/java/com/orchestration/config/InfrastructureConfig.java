@@ -128,13 +128,17 @@ public class InfrastructureConfig {
     public ProjectPlanner projectPlanner(AgentFactory agentFactory, AuditLog auditLog,
                                          ObjectProvider<ClarificationGateway> clarificationGateway,
                                          ProjectKnowledgeStore knowledgeStore,
-                                         ObjectProvider<ProjectWorkspaces> workspaces) {
+                                         ObjectProvider<ProjectWorkspaces> workspaces,
+                                         ObjectProvider<SkillRegistry> skillRegistry) {
         // The gateway is only defined under the mcp profile (Claude Code relays to the human); when
         // absent the planner runs its single-pass behaviour with no human in the loop. The knowledge
         // store gives the team prior context on edits (inert when the feature is disabled). When a
-        // ProjectWorkspaces is present (mcp), the planner opens this project's isolated workspace.
+        // ProjectWorkspaces is present (mcp), the planner opens this project's isolated workspace. The
+        // SkillRegistry lets the Skill Smith persist an approved domain skill mid-run; it needs the
+        // gateway (above) to get the user's approval, so synthesis is inert without one.
         return new TeamLeadProjectPlanner(agentFactory, auditLog,
-                clarificationGateway.getIfAvailable(), knowledgeStore, workspaces.getIfAvailable());
+                clarificationGateway.getIfAvailable(), knowledgeStore, workspaces.getIfAvailable(),
+                skillRegistry.getIfAvailable());
     }
 
     @Bean

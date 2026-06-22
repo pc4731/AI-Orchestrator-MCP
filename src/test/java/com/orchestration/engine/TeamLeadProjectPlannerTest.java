@@ -5,20 +5,32 @@ import com.orchestration.agent.AgentFactory;
 import com.orchestration.agent.AgentId;
 import com.orchestration.agent.AgentRole;
 import com.orchestration.agent.Capability;
+import com.orchestration.agent.SkillRegistry;
+import com.orchestration.phase.PhasePlan;
+import com.orchestration.phase.PhasePlanStore;
 import com.orchestration.task.Task;
 import com.orchestration.task.TaskGraph;
 import com.orchestration.task.WorkflowState;
+import com.orchestration.workspace.FileProjectWorkspaces;
+import com.orchestration.workspace.ProjectWorkspaces;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 
+import java.nio.file.Path;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class TeamLeadProjectPlannerTest {
+
+    @TempDir
+    Path workspaceBase;
 
     private static AgentFactory teamLeadReturning(Agent.Response response) {
         Agent teamLead = new Agent() {
@@ -365,6 +377,197 @@ class TeamLeadProjectPlannerTest {
         return new com.orchestration.knowledge.ProjectKnowledgeStore(noRepo, true, ".project/knowledge.md") {
             @Override public Optional<String> load() { return Optional.ofNullable(brief); }
         };
+    }
+
+    /** A factory wiring a Phase Planner (returns a 2-phase roadmap) and a Team Lead that records the
+     *  grounding it was handed, so a test can assert what the phasing prelude injected. */
+    private static AgentFactory phasePlannerAndTeamLead(AtomicReference<Map<String, String>> tlGrounding) {
+        Agent planner = new Agent() {
+            @Override public AgentId id() { return new AgentId("pp"); }
+            @Override public AgentRole role() { return AgentRole.PHASE_PLANNER; }
+            @Override public Set<Capability> capabilities() { return Set.of(Capability.DECOMPOSE_TASKS); }
+            @Override public boolean canHandle(Task task) { return true; }
+            @Override public Response handle(Request request, Context context) {
+                return new Response(Outcome.COMPLETED, Map.of("phases", List.of(
+                        Map.of("title", "Foundation", "description", "schema + core"),
+                        Map.of("title", "Auth", "description", "login & sessions"))),
+                        List.of(), Confidence.HIGH, List.of(), Optional.empty());
+            }
+        };
+        Agent tl = new Agent() {
+            @Override public AgentId id() { return new AgentId("tl"); }
+            @Override public AgentRole role() { return AgentRole.TEAM_LEAD; }
+            @Override public Set<Capability> capabilities() { return Set.of(Capability.DECOMPOSE_TASKS); }
+            @Override public boolean canHandle(Task task) { return true; }
+            @Override public Response handle(Request request, Context context) {
+                tlGrounding.set(request.inputArtifacts());
+                return new Response(Outcome.COMPLETED,
+                        Map.of("tasks", List.of(Map.of("id", "t1", "title", "Build",
+                                "role", "BACKEND_DEVELOPER", "dependsOn", List.of()))),
+                        List.of(), Confidence.HIGH, List.of(), Optional.empty());
+            }
+        };
+        return new AgentFactory() {
+            @Override public Agent create(AgentRole role) {
+                return role == AgentRole.PHASE_PLANNER ? planner : tl;
+            }
+            @Override public boolean supports(AgentRole role) {
+                return role == AgentRole.PHASE_PLANNER || role == AgentRole.TEAM_LEAD;
+            }
+            @Override public Set<AgentRole> supportedRoles() {
+                return Set.of(AgentRole.PHASE_PLANNER, AgentRole.TEAM_LEAD);
+            }
+        };
+    }
+
+    @Test
+    void phasedBuildPlansARoadmapPersistsItAndScopesTheTeamLeadToPhaseOne() {
+        AtomicReference<Map<String, String>> tlGrounding = new AtomicReference<>(Map.of());
+        ProjectWorkspaces workspaces =
+                new FileProjectWorkspaces(workspaceBase, true, ".project/knowledge.md");
+        OrchestrationEngine.ProjectRequest phased = new OrchestrationEngine.ProjectRequest(
+                "build a big app", Map.of("phased", true), Optional.empty());
+
+        new TeamLeadProjectPlanner(phasePlannerAndTeamLead(tlGrounding), null, null, null, workspaces)
+                .plan("p1", phased);
+
+        // The Team Lead is scoped to phase 1 and sees the whole roadmap as context.
+        assertTrue(tlGrounding.get().getOrDefault("currentPhase", "").contains("PHASE 1"),
+                "the Team Lead must be told it is building phase 1");
+        assertTrue(tlGrounding.get().containsKey("phasePlan"), "the roadmap is grounding");
+
+        // The roadmap is committed in the project repo so a future session can read it.
+        PhasePlan saved = new PhasePlanStore(workspaces.get("p1").repository()).load().orElseThrow();
+        assertEquals(2, saved.phases().size());
+        assertEquals("Foundation", saved.phases().get(0).title());
+        assertEquals(PhasePlan.Status.IN_PROGRESS, saved.phases().get(0).status());
+        assertEquals(PhasePlan.Status.PENDING, saved.phases().get(1).status());
+    }
+
+    @Test
+    void continuationRunAdvancesToTheNextPendingPhase() {
+        AtomicReference<Map<String, String>> tlGrounding = new AtomicReference<>(Map.of());
+        ProjectWorkspaces workspaces =
+                new FileProjectWorkspaces(workspaceBase, true, ".project/knowledge.md");
+        AgentFactory factory = phasePlannerAndTeamLead(tlGrounding);
+        TeamLeadProjectPlanner planner =
+                new TeamLeadProjectPlanner(factory, null, null, null, workspaces);
+
+        // Session 1: phased build creates the roadmap and builds phase 1.
+        planner.plan("p1", new OrchestrationEngine.ProjectRequest(
+                "build a big app", Map.of("phased", true), Optional.empty()));
+        // Simulate phase 1 finishing (the service marks it done on a successful run).
+        PhasePlanStore store = new PhasePlanStore(workspaces.get("p1").repository());
+        store.markStatus(1, PhasePlan.Status.DONE, "PHASE_PLANNER");
+
+        // Session 2: a phase-continue run (orchestrate_phases build=true) advances to phase 2.
+        planner.plan("p1", new OrchestrationEngine.ProjectRequest(
+                "continue", Map.of("editDir", workspaces.get("p1").dir(), "phaseContinue", true),
+                Optional.empty()));
+
+        assertTrue(tlGrounding.get().getOrDefault("currentPhase", "").contains("PHASE 2"),
+                "a continuation run picks up the next pending phase");
+        PhasePlan after = store.load().orElseThrow();
+        assertEquals(PhasePlan.Status.DONE, after.phases().get(0).status());
+        assertEquals(PhasePlan.Status.IN_PROGRESS, after.phases().get(1).status());
+    }
+
+    @Test
+    void plainEditOnAPhasedProjectDoesNotConsumeAPhase() {
+        AtomicReference<Map<String, String>> tlGrounding = new AtomicReference<>(Map.of());
+        ProjectWorkspaces workspaces =
+                new FileProjectWorkspaces(workspaceBase, true, ".project/knowledge.md");
+        TeamLeadProjectPlanner planner =
+                new TeamLeadProjectPlanner(phasePlannerAndTeamLead(tlGrounding), null, null, null, workspaces);
+
+        planner.plan("p1", new OrchestrationEngine.ProjectRequest(
+                "build a big app", Map.of("phased", true), Optional.empty()));
+        PhasePlanStore store = new PhasePlanStore(workspaces.get("p1").repository());
+
+        // A normal edit (no phaseContinue) must NOT advance the roadmap — phase 1 stays in progress.
+        planner.plan("p1", new OrchestrationEngine.ProjectRequest(
+                "fix a typo", Map.of("editDir", workspaces.get("p1").dir()), Optional.empty()));
+
+        assertTrue(tlGrounding.get().get("currentPhase") == null,
+                "a plain edit must not be scoped to a phase");
+        PhasePlan after = store.load().orElseThrow();
+        assertEquals(PhasePlan.Status.IN_PROGRESS, after.phases().get(0).status(),
+                "phase 1 must still be in progress, not silently marked done or advanced");
+    }
+
+    /** A factory wiring a Skill Smith (proposes one domain skill) and a Team Lead. */
+    private static AgentFactory skillSmithAndTeamLead() {
+        Agent smith = new Agent() {
+            @Override public AgentId id() { return new AgentId("ss"); }
+            @Override public AgentRole role() { return AgentRole.SKILL_SMITH; }
+            @Override public Set<Capability> capabilities() { return Set.of(Capability.MARKET_RESEARCH); }
+            @Override public boolean canHandle(Task task) { return true; }
+            @Override public Response handle(Request request, Context context) {
+                return new Response(Outcome.COMPLETED, Map.of("skills", List.of(Map.of(
+                        "name", "AEM Development",
+                        "content", "Build AEM components with Sling Models and HTL.",
+                        "roles", List.of("FRONTEND_DEVELOPER")))),
+                        List.of(), Confidence.HIGH, List.of(), Optional.empty());
+            }
+        };
+        return new AgentFactory() {
+            @Override public Agent create(AgentRole role) {
+                return role == AgentRole.SKILL_SMITH ? smith : teamLeadReturningOneTask();
+            }
+            @Override public boolean supports(AgentRole role) {
+                return role == AgentRole.SKILL_SMITH || role == AgentRole.TEAM_LEAD;
+            }
+            @Override public Set<AgentRole> supportedRoles() {
+                return Set.of(AgentRole.SKILL_SMITH, AgentRole.TEAM_LEAD);
+            }
+        };
+    }
+
+    private static ClarificationGateway gatewayAnswering(String answer) {
+        return new ClarificationGateway() {
+            @Override public Optional<String> ask(String projectId, List<String> questions, String ctx) {
+                return Optional.ofNullable(answer);
+            }
+            @Override public Confirmation confirm(String projectId, String understanding) {
+                return Confirmation.approved();
+            }
+        };
+    }
+
+    @Test
+    void approvedDomainSkillIsResearchedThenAttachedToItsRole(@TempDir Path skillsDir) {
+        SkillRegistry registry = new SkillRegistry(skillsDir);
+        TeamLeadProjectPlanner planner = new TeamLeadProjectPlanner(
+                skillSmithAndTeamLead(), null, gatewayAnswering("approve"), null, null, registry);
+
+        planner.plan("p1", request());
+
+        // The user approved, so the researched skill is persisted and attached to the role that needs it.
+        assertTrue(registry.resolveForRole(AgentRole.FRONTEND_DEVELOPER, List.of()).contains("Sling Models"),
+                "an approved domain skill must reach the role it was attached to");
+        assertEquals(List.of("aem-development"), registry.attachedNames(AgentRole.FRONTEND_DEVELOPER));
+    }
+
+    @Test
+    void rejectedDomainSkillIsNotAttached(@TempDir Path skillsDir) {
+        SkillRegistry registry = new SkillRegistry(skillsDir);
+        TeamLeadProjectPlanner planner = new TeamLeadProjectPlanner(
+                skillSmithAndTeamLead(), null, gatewayAnswering("reject"), null, null, registry);
+
+        planner.plan("p1", request());
+
+        assertTrue(registry.attachedNames(AgentRole.FRONTEND_DEVELOPER).isEmpty(),
+                "a rejected skill must never be attached");
+        assertFalse(registry.resolveForRole(AgentRole.FRONTEND_DEVELOPER, List.of()).contains("Sling Models"));
+    }
+
+    @Test
+    void domainSkillSynthesisIsSkippedWithoutAnApprovalGateway() {
+        SkillRegistry registry = new SkillRegistry(Path.of("__unused__"));
+        // No ClarificationGateway → no approval channel → synthesis must not run or attach anything.
+        new TeamLeadProjectPlanner(skillSmithAndTeamLead(), null, null, null, null, registry)
+                .plan("p1", request());
+        assertTrue(registry.attachedNames(AgentRole.FRONTEND_DEVELOPER).isEmpty());
     }
 
     @Test

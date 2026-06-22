@@ -10,6 +10,7 @@ import java.nio.file.Path;
 import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.Set;
 import java.util.stream.Stream;
 
 /**
@@ -84,18 +85,53 @@ public class JGitArtifactRepository implements ArtifactRepository {
     @Override
     public List<String> list(String pathPrefix) {
         String prefix = pathPrefix == null ? "" : pathPrefix;
+        Set<String> ignored = ignoredPaths();
         try (Stream<Path> walk = Files.walk(root)) {
             return walk
                     .filter(Files::isRegularFile)
                     .map(root::relativize)
                     .map(p -> p.toString().replace('\\', '/'))
                     .filter(rel -> !rel.startsWith(".git/"))
+                    .filter(rel -> !isIgnored(rel, ignored))
                     .filter(rel -> rel.startsWith(prefix))
                     .sorted()
                     .toList();
         } catch (IOException e) {
             throw new ArtifactRepositoryException("Failed to list artifacts under " + prefix, e);
         }
+    }
+
+    /** Paths Git ignores per the project's {@code .gitignore}(s). Honouring these keeps generated /
+     *  scratch output — {@code node_modules/}, a project's {@code backend/.data/} test uploads, build
+     *  dirs — out of the file listing, which is the single most-repeated grounding-noise complaint in
+     *  the orchestration retros: a static denylist can't know a project's own ignored dirs, but Git
+     *  does. Best-effort: any failure yields an empty set so listing never breaks, it just filters less. */
+    private Set<String> ignoredPaths() {
+        synchronized (lock) {
+            try {
+                return git.status().call().getIgnoredNotInIndex();
+            } catch (GitAPIException | RuntimeException e) {
+                return Set.of();
+            }
+        }
+    }
+
+    /** True when {@code rel} is itself ignored or sits under an ignored directory. JGit reports an
+     *  ignored directory as a single entry (it does not descend), so a prefix check is required. */
+    private static boolean isIgnored(String rel, Set<String> ignored) {
+        if (ignored.isEmpty() || rel == null) {
+            return false;
+        }
+        if (ignored.contains(rel)) {
+            return true;
+        }
+        for (String ig : ignored) {
+            String dir = ig.endsWith("/") ? ig : ig + "/";
+            if (rel.startsWith(dir)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private String commitMessage(WriteRequest request) {

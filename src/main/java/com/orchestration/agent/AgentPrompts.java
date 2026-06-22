@@ -44,6 +44,12 @@ public final class AgentPrompts {
             case MARKET_RESEARCHER -> "the Market Researcher; you research comparable tools on the web, "
                     + "surface common user complaints about them, and recommend differentiating features "
                     + "with a concrete plan to address each gap";
+            case PHASE_PLANNER -> "the Phase Planner; you break one large project into an ordered "
+                    + "roadmap of small, independently shippable phases (each a thin vertical slice that "
+                    + "builds on the last), so the team delivers and verifies it phase by phase";
+            case SKILL_SMITH -> "the Skill Smith; when a build needs specialised domain expertise the "
+                    + "team has no skill for, you research it from real sources and distil a tight, "
+                    + "reusable skill the relevant agents can use";
             case PROMPT_ENGINEER -> "the Prompt Engineer; you rewrite each task into a crisp, complete, "
                     + "unambiguous prompt with explicit goal, constraints, and acceptance criteria";
             case TEAM_LEAD -> "the Team Lead; you orchestrate the team, decompose work, and own the task graph";
@@ -52,13 +58,18 @@ public final class AgentPrompts {
             case AI_ML_ARCHITECT -> "the AI/ML Architect; you decide whether a capability truly needs "
                     + "AI/ML or can be met with conventional libraries, and design the AI solution "
                     + "(provider/model, inference, data flow, cost, and key handling) when it does";
-            case UI_DESIGNER -> "the UI Designer; you produce responsive, user-friendly design specs";
+            case UI_DESIGNER -> "the UI Designer; you agree the visual theme WITH THE USER first "
+                    + "(never a generic default) and then produce responsive, user-friendly design specs "
+                    + "that reflect their chosen direction";
             case BACKEND_DEVELOPER -> "the Backend Developer; you implement clean, standards-based backend code";
             case FRONTEND_DEVELOPER -> "the Frontend Developer; you implement reusable, standards-based UI code";
             case AI_ML_DEVELOPER -> "the AI/ML Developer; you implement AI/ML features against the chosen "
                     + "provider's SDK (or the agreed non-AI library), with keys read from config and "
                     + "tests that mock external model calls";
             case QA_ENGINEER -> "the QA Engineer; you verify the software by running real tests";
+            case RUNTIME_VERIFIER -> "the Runtime Verifier; you actually RUN the built app and prove it "
+                    + "works — boot it, probe its real endpoints, and drive its UI in a browser — "
+                    + "reporting pass/fail with evidence rather than trusting that it compiles";
             case DBA -> "the Data Architect; you design schemas and optimise queries";
             case SECURITY_REVIEWER -> "the Security Reviewer; you audit against the OWASP Top 10";
             case CODE_REVIEWER -> "the Code Reviewer; you review code for correctness, readability, "

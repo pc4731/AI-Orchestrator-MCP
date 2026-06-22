@@ -233,9 +233,11 @@ public class AgentTaskProcessor implements TaskProcessor {
     private Agent.Response runTask(String projectId, Task task, Agent agent, String refinedPrompt,
                                    Map<String, Object> baseParams, Map<String, String> upstream) {
         return switch (agent.role()) {
-            // QA verification gets a build-fix loop (re-run a developer on failure) instead of the
-            // generic rework loop, since re-running QA on a red build would change nothing.
-            case QA_ENGINEER -> verifyWithBuildFix(projectId, task, agent, baseParams, upstream);
+            // Verification roles get a build-fix loop (re-run a developer on failure) instead of the
+            // generic rework loop, since re-running the verifier on a still-broken build/app would
+            // change nothing. QA runs the test command; the Runtime Verifier boots and probes the app.
+            case QA_ENGINEER, RUNTIME_VERIFIER ->
+                    verifyWithBuildFix(projectId, task, agent, baseParams, upstream);
             // Reviewers finish their review (COMPLETED with findings); a developer is dispatched to
             // FIX the findings rather than re-running the reviewer as pointless "rework".
             case CODE_REVIEWER, SECURITY_REVIEWER ->
@@ -516,8 +518,11 @@ public class AgentTaskProcessor implements TaskProcessor {
                                               Map<String, String> upstream) {
         // In mcp mode, prefer running the REAL build command (a verified exit code) over the role-played
         // QA agent's claim. If the toolchain can't even start, fall back to the role-played path so an
-        // environment issue doesn't block an otherwise-good project.
-        boolean realBuild = buildVerifier != null && agentsReadFilesDirectly;
+        // environment issue doesn't block an otherwise-good project. Only QA runs the test command; the
+        // Runtime Verifier's job is to boot-and-probe the live app, so it always takes the role-played
+        // path (the MCP brain actually starts the server and drives it).
+        boolean realBuild = buildVerifier != null && agentsReadFilesDirectly
+                && qa.role() == AgentRole.QA_ENGINEER;
         Agent.Response response = realBuild ? runRealBuild(projectId, task, qa, baseParams, 0) : null;
         if (response == null) {
             realBuild = false;
@@ -537,9 +542,10 @@ public class AgentTaskProcessor implements TaskProcessor {
             Agent developer = agentFactory.create(devRole);
             Task fixTask = new Task(TaskId.random(), "Fix failing build", task.description(), devRole,
                     WorkflowState.IN_PROGRESS, List.of(), Map.of(), Instant.now(), Instant.now());
-            String fixInstructions = "The project does NOT build / its tests FAIL. Fix the code so it "
-                    + "compiles and every test passes; return the corrected files as artifacts.\n\n"
-                    + "Build failure output:\n" + failure;
+            String fixInstructions = "Verification FAILED (the project does not build, its tests fail, "
+                    + "or the running app misbehaved). Fix the code so it compiles, every test passes, "
+                    + "and the app runs correctly; return the corrected files as artifacts.\n\n"
+                    + "Failure detail:\n" + failure;
             Map<String, String> fixGrounding = new LinkedHashMap<>(upstream);
             fixGrounding.put("buildFailure", failure);
             dispatch(projectId, fixTask, developer, fixInstructions, fixGrounding, baseParams,
@@ -766,7 +772,7 @@ public class AgentTaskProcessor implements TaskProcessor {
             "node_modules", ".venv", "venv", "env", "__pycache__", ".pytest_cache", ".mypy_cache",
             ".ruff_cache", ".tox", ".eggs", "build", "dist", "out", "target", ".gradle", ".idea",
             ".vscode", ".vite", ".next", ".nuxt", ".svelte-kit", ".cache", "coverage", ".nyc_output",
-            "vendor", ".terraform", "bin", "obj", ".angular", ".parcel-cache");
+            "vendor", ".terraform", "bin", "obj", ".angular", ".parcel-cache", ".data");
 
     /** Noise files that add bytes but no signal for a reviewer. */
     private static final java.util.Set<String> GROUNDING_NOISE_FILES = java.util.Set.of(
@@ -792,7 +798,7 @@ public class AgentTaskProcessor implements TaskProcessor {
     /** Roles that review actual code and so need the real file contents, not just summaries. */
     private static boolean needsFileAccess(AgentRole role) {
         return role == AgentRole.CODE_REVIEWER || role == AgentRole.SECURITY_REVIEWER
-                || role == AgentRole.QA_ENGINEER;
+                || role == AgentRole.QA_ENGINEER || role == AgentRole.RUNTIME_VERIFIER;
     }
 
     /** The code-writing developer roles — they produce real source and can build/test their work. */

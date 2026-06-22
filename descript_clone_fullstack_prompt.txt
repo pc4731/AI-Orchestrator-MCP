@@ -1,0 +1,1377 @@
+================================================================================
+        DESCRIPT CLONE — PRODUCTION-LEVEL FULL STACK ENGINEERING PROMPT
+         AI-Powered Text-Based Audio/Video Editor (Complete System Design)
+================================================================================
+
+PROJECT NAME: [Your App Name] — AI Video & Podcast Editor
+GOAL: Build a production-grade, full-stack clone of Descript (web.descript.com)
+      with real AI/ML capabilities, scalable backend, real-time collaboration,
+      and cloud-native infrastructure.
+
+================================================================================
+                          TABLE OF CONTENTS
+================================================================================
+1.  System Architecture Overview
+2.  Tech Stack (Every Layer)
+3.  Database Design (PostgreSQL + Redis + S3)
+4.  Backend API (Node.js/Express + Python ML Services)
+5.  Frontend (React + TypeScript)
+6.  AI/ML Pipeline (Transcription, NLP, Voice Cloning, Video AI)
+7.  Real-Time Features (WebSockets + Redis Pub/Sub)
+8.  Media Processing Pipeline (FFmpeg + Cloud)
+9.  Authentication & Authorization
+10. File Storage & CDN
+11. Queue & Worker System
+12. DevOps & Infrastructure (Docker + Kubernetes + CI/CD)
+13. Monitoring & Observability
+14. Detailed Feature List with Implementation Guide
+15. API Endpoint Reference
+16. Environment Variables Reference
+17. Phase-by-Phase Build Order
+
+================================================================================
+1. SYSTEM ARCHITECTURE OVERVIEW
+================================================================================
+
+The system is a microservices-based architecture with these core services:
+
+  ┌─────────────────────────────────────────────────────────────┐
+  │                        CLIENT LAYER                         │
+  │         React SPA (TypeScript) + Next.js (Marketing)        │
+  └─────────────────────────────┬───────────────────────────────┘
+                                │ HTTPS / WSS
+  ┌─────────────────────────────▼───────────────────────────────┐
+  │              API GATEWAY (Kong / AWS API Gateway)           │
+  │         Rate Limiting | Auth | Routing | Load Balancing     │
+  └───┬─────────────┬──────────────┬────────────┬──────────────┘
+      │             │              │            │
+  ┌───▼───┐   ┌────▼────┐   ┌────▼────┐  ┌───▼──────┐
+  │ Auth  │   │  Core   │   │  Media  │  │   AI/ML  │
+  │Service│   │  API    │   │ Service │  │ Service  │
+  │(Node) │   │ (Node)  │   │(Python) │  │(Python)  │
+  └───┬───┘   └────┬────┘   └────┬────┘  └───┬──────┘
+      │             │              │            │
+  ┌───▼─────────────▼──────────────▼────────────▼──────────────┐
+  │                     MESSAGE QUEUE (BullMQ + Redis)          │
+  │         transcription | render | export | notification      │
+  └────────────────────────────┬────────────────────────────────┘
+                               │
+  ┌────────────────────────────▼────────────────────────────────┐
+  │                      DATA LAYER                             │
+  │  PostgreSQL (primary)  |  Redis (cache/sessions/pubsub)     │
+  │  S3/R2 (media storage) |  Elasticsearch (search)            │
+  │  TimescaleDB (metrics) |  Qdrant (vector embeddings)        │
+  └─────────────────────────────────────────────────────────────┘
+
+================================================================================
+2. COMPLETE TECH STACK
+================================================================================
+
+--- FRONTEND ---
+Framework:          React 18 + TypeScript + Vite
+State Management:   Zustand (global) + React Query (server state)
+Styling:            Tailwind CSS + shadcn/ui component library
+Rich Text Editor:   Slate.js (custom transcript editor with decorations)
+Video Player:       Video.js or custom HTML5 canvas player
+Audio Waveform:     WaveSurfer.js
+Timeline:           Custom canvas-based or react-timeline-editor
+Real-Time:          Socket.io-client
+Drag & Drop:        @dnd-kit/core
+Recording:          MediaRecorder API + RecordRTC
+File Upload:        TUS protocol (resumable uploads via tus-js-client)
+Video Processing:   FFmpeg.wasm (client-side lightweight ops)
+Routing:            React Router v6
+Forms:              React Hook Form + Zod validation
+Animation:          Framer Motion
+Icons:              Lucide React
+Charts:             Recharts (for analytics dashboard)
+Testing:            Vitest + Playwright (e2e)
+Build:              Vite + Rollup
+
+--- BACKEND (Core API) ---
+Runtime:            Node.js 20 LTS
+Framework:          Express.js + TypeScript (or Fastify for speed)
+ORM:                Prisma (PostgreSQL)
+Validation:         Zod
+Auth:               JWT (access) + Refresh Tokens + OAuth2 (Google/GitHub)
+WebSockets:         Socket.io
+Queue:              BullMQ + Redis
+Email:              Resend or Nodemailer + SMTP
+Storage SDK:        AWS SDK v3 / Cloudflare R2 SDK
+Payments:           Stripe SDK
+Testing:            Jest + Supertest
+Logging:            Winston + Pino
+Documentation:      Swagger/OpenAPI (auto-generated)
+
+--- AI/ML SERVICE (Python) ---
+Framework:          FastAPI + Uvicorn
+Transcription:      OpenAI Whisper (whisper-large-v3) or AssemblyAI API
+Speaker Diarization:pyannote.audio
+NLP / Filler Words: spaCy + custom fine-tuned model
+Voice Cloning:      Coqui TTS or ElevenLabs API
+Background Removal: rembg (image) / DeepLabV3 (video)
+Silence Detection:  librosa + custom VAD (Voice Activity Detection)
+AI Summarization:   OpenAI GPT-4o or Anthropic Claude API
+Clip Detection:     Custom ML model (transformer-based) or OpenAI embeddings
+Translation:        DeepL API or Helsinki-NLP/opus-mt models
+Studio Sound:       Facebook Denoiser / DeepFilterNet
+Embeddings:         sentence-transformers (for semantic search)
+Vector DB:          Qdrant (for AI clip suggestions, similar content)
+ML Serving:         Triton Inference Server or TorchServe (for heavy models)
+
+--- MEDIA PROCESSING SERVICE (Python/Node) ---
+Video Processing:   FFmpeg (via subprocess or fluent-ffmpeg)
+Video Thumbnails:   FFmpeg (extract frame at 00:00:02)
+Waveform Data:      audiowaveform tool → JSON peaks
+Audio Normalization:FFmpeg loudnorm filter
+Export Formats:     MP4, MP3, WAV, SRT, VTT, TXT, DOCX
+HLS Streaming:      FFmpeg → .m3u8 + .ts segments → S3 → CloudFront CDN
+Watermarking:       FFmpeg drawtext/overlay filter
+Green Screen:       OpenCV + custom matting or Runway ML API
+
+--- DATABASE ---
+Primary DB:         PostgreSQL 15 (via RDS or Supabase)
+Cache:              Redis 7 (ElastiCache or Upstash)
+Search:             Elasticsearch 8 (or Typesense as lighter option)
+Vector Search:      Qdrant (self-hosted or cloud)
+Time Series:        TimescaleDB (usage metrics, analytics)
+Migrations:         Prisma Migrate
+
+--- STORAGE ---
+Media Files:        AWS S3 or Cloudflare R2 (cheaper egress)
+CDN:                CloudFront or Cloudflare (for video streaming)
+Upload Protocol:    TUS (resumable) for large video files
+Thumbnails:         Stored separately with size variants (200w, 400w, 800w)
+
+--- INFRASTRUCTURE ---
+Containers:         Docker + Docker Compose (dev) → Kubernetes (prod)
+Orchestration:      Kubernetes (EKS on AWS or GKE on GCP)
+CI/CD:              GitHub Actions → Docker Build → Push to ECR → K8s Deploy
+Reverse Proxy:      Nginx or Traefik
+SSL:                Let's Encrypt (cert-manager in K8s)
+Secrets:            AWS Secrets Manager or HashiCorp Vault
+IaC:                Terraform (for AWS resources)
+Environment:        Dev | Staging | Production (3 environments)
+
+--- MONITORING ---
+Metrics:            Prometheus + Grafana
+Logging:            ELK Stack (Elasticsearch + Logstash + Kibana)
+Tracing:            OpenTelemetry + Jaeger
+Error Tracking:     Sentry (frontend + backend)
+Uptime:             Better Uptime or Checkly
+Alerts:             PagerDuty or OpsGenie
+
+--- PAYMENTS ---
+Provider:           Stripe
+Plans:              Free | Creator ($15/mo) | Pro ($30/mo) | Team ($50/seat)
+Features:           Subscriptions, usage metering, invoices, webhooks
+
+================================================================================
+3. DATABASE DESIGN (PostgreSQL Schema)
+================================================================================
+
+--- USERS TABLE ---
+CREATE TABLE users (
+  id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  email           VARCHAR(255) UNIQUE NOT NULL,
+  name            VARCHAR(255),
+  avatar_url      TEXT,
+  password_hash   TEXT,
+  oauth_provider  VARCHAR(50),      -- 'google' | 'github' | null
+  oauth_id        VARCHAR(255),
+  plan            VARCHAR(20) DEFAULT 'free',  -- free | creator | pro | team
+  stripe_customer_id VARCHAR(255),
+  transcription_minutes_used INTEGER DEFAULT 0,
+  transcription_minutes_limit INTEGER DEFAULT 30,
+  storage_used_bytes BIGINT DEFAULT 0,
+  storage_limit_bytes BIGINT DEFAULT 5368709120,  -- 5GB free
+  created_at      TIMESTAMPTZ DEFAULT NOW(),
+  updated_at      TIMESTAMPTZ DEFAULT NOW()
+);
+
+--- WORKSPACES TABLE (team support) ---
+CREATE TABLE workspaces (
+  id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  name            VARCHAR(255) NOT NULL,
+  slug            VARCHAR(255) UNIQUE NOT NULL,
+  owner_id        UUID REFERENCES users(id) ON DELETE CASCADE,
+  plan            VARCHAR(20) DEFAULT 'free',
+  stripe_subscription_id VARCHAR(255),
+  logo_url        TEXT,
+  created_at      TIMESTAMPTZ DEFAULT NOW()
+);
+
+--- WORKSPACE MEMBERS ---
+CREATE TABLE workspace_members (
+  workspace_id    UUID REFERENCES workspaces(id) ON DELETE CASCADE,
+  user_id         UUID REFERENCES users(id) ON DELETE CASCADE,
+  role            VARCHAR(20) DEFAULT 'editor',  -- owner | admin | editor | viewer
+  joined_at       TIMESTAMPTZ DEFAULT NOW(),
+  PRIMARY KEY (workspace_id, user_id)
+);
+
+--- PROJECTS TABLE ---
+CREATE TABLE projects (
+  id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  workspace_id    UUID REFERENCES workspaces(id) ON DELETE CASCADE,
+  created_by      UUID REFERENCES users(id),
+  name            VARCHAR(500) NOT NULL,
+  description     TEXT,
+  thumbnail_url   TEXT,
+  duration_ms     INTEGER DEFAULT 0,
+  status          VARCHAR(30) DEFAULT 'active',  -- active | archived | deleted
+  is_public       BOOLEAN DEFAULT false,
+  settings        JSONB DEFAULT '{}',
+  created_at      TIMESTAMPTZ DEFAULT NOW(),
+  updated_at      TIMESTAMPTZ DEFAULT NOW()
+);
+
+--- COMPOSITIONS TABLE (a project can have multiple compositions) ---
+CREATE TABLE compositions (
+  id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  project_id      UUID REFERENCES projects(id) ON DELETE CASCADE,
+  name            VARCHAR(500) DEFAULT 'Untitled Composition',
+  aspect_ratio    VARCHAR(10) DEFAULT '16:9',  -- 16:9 | 9:16 | 1:1 | 4:3
+  resolution      VARCHAR(20) DEFAULT '1920x1080',
+  fps             INTEGER DEFAULT 30,
+  duration_ms     INTEGER DEFAULT 0,
+  thumbnail_url   TEXT,
+  created_at      TIMESTAMPTZ DEFAULT NOW(),
+  updated_at      TIMESTAMPTZ DEFAULT NOW()
+);
+
+--- MEDIA FILES TABLE ---
+CREATE TABLE media_files (
+  id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  workspace_id    UUID REFERENCES workspaces(id) ON DELETE CASCADE,
+  uploaded_by     UUID REFERENCES users(id),
+  name            VARCHAR(500) NOT NULL,
+  type            VARCHAR(20) NOT NULL,   -- video | audio | image
+  mime_type       VARCHAR(100),
+  s3_key          TEXT NOT NULL,
+  s3_bucket       VARCHAR(255) NOT NULL,
+  cdn_url         TEXT,
+  size_bytes      BIGINT NOT NULL,
+  duration_ms     INTEGER,
+  width           INTEGER,
+  height          INTEGER,
+  thumbnail_url   TEXT,
+  waveform_data   JSONB,       -- peaks array for WaveSurfer
+  hls_playlist_url TEXT,       -- for adaptive streaming
+  processing_status VARCHAR(30) DEFAULT 'pending',  -- pending|processing|ready|failed
+  created_at      TIMESTAMPTZ DEFAULT NOW()
+);
+
+--- TRANSCRIPT TABLE ---
+CREATE TABLE transcripts (
+  id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  media_file_id   UUID REFERENCES media_files(id) ON DELETE CASCADE,
+  language        VARCHAR(10) DEFAULT 'en',
+  status          VARCHAR(30) DEFAULT 'pending',  -- pending|processing|ready|failed
+  raw_data        JSONB,          -- full whisper output with words + timestamps
+  created_at      TIMESTAMPTZ DEFAULT NOW(),
+  updated_at      TIMESTAMPTZ DEFAULT NOW()
+);
+
+--- TRANSCRIPT WORDS (normalized for fast seeking) ---
+CREATE TABLE transcript_words (
+  id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  transcript_id   UUID REFERENCES transcripts(id) ON DELETE CASCADE,
+  word            TEXT NOT NULL,
+  start_ms        INTEGER NOT NULL,
+  end_ms          INTEGER NOT NULL,
+  confidence      FLOAT,
+  speaker_id      VARCHAR(50),   -- SPEAKER_00, SPEAKER_01...
+  is_filler       BOOLEAN DEFAULT false,
+  is_ignored      BOOLEAN DEFAULT false,
+  paragraph_index INTEGER,
+  word_index      INTEGER
+);
+CREATE INDEX idx_transcript_words_transcript ON transcript_words(transcript_id);
+CREATE INDEX idx_transcript_words_start ON transcript_words(start_ms);
+
+--- SCENES TABLE ---
+CREATE TABLE scenes (
+  id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  composition_id  UUID REFERENCES compositions(id) ON DELETE CASCADE,
+  index           INTEGER NOT NULL,
+  start_ms        INTEGER NOT NULL,
+  end_ms          INTEGER NOT NULL,
+  duration_ms     INTEGER GENERATED ALWAYS AS (end_ms - start_ms) STORED,
+  layout_id       UUID,
+  background_color VARCHAR(20) DEFAULT '#000000',
+  thumbnail_url   TEXT,
+  created_at      TIMESTAMPTZ DEFAULT NOW()
+);
+
+--- LAYERS TABLE (visual elements in a scene) ---
+CREATE TABLE layers (
+  id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  scene_id        UUID REFERENCES scenes(id) ON DELETE CASCADE,
+  composition_id  UUID REFERENCES compositions(id) ON DELETE CASCADE,
+  type            VARCHAR(30) NOT NULL,  -- video|audio|text|image|shape|webcam
+  name            VARCHAR(255),
+  z_index         INTEGER DEFAULT 0,
+  start_ms        INTEGER NOT NULL,
+  end_ms          INTEGER NOT NULL,
+  x               FLOAT DEFAULT 0,
+  y               FLOAT DEFAULT 0,
+  width           FLOAT DEFAULT 100,
+  height          FLOAT DEFAULT 100,
+  opacity         FLOAT DEFAULT 1,
+  rotation        FLOAT DEFAULT 0,
+  properties      JSONB DEFAULT '{}',
+  -- For text layers: font, size, color, content
+  -- For media layers: media_file_id, trim_start, trim_end, volume
+  -- For shape layers: fill, stroke, border_radius
+  created_at      TIMESTAMPTZ DEFAULT NOW()
+);
+
+--- CAPTIONS TABLE ---
+CREATE TABLE captions (
+  id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  composition_id  UUID REFERENCES compositions(id) ON DELETE CASCADE,
+  language        VARCHAR(10) DEFAULT 'en',
+  style           JSONB DEFAULT '{}',  -- font, size, color, position, animation
+  segments        JSONB,               -- array of {start_ms, end_ms, text}
+  created_at      TIMESTAMPTZ DEFAULT NOW()
+);
+
+--- COMMENTS TABLE (collaborative review) ---
+CREATE TABLE comments (
+  id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  composition_id  UUID REFERENCES compositions(id) ON DELETE CASCADE,
+  user_id         UUID REFERENCES users(id) ON DELETE CASCADE,
+  parent_id       UUID REFERENCES comments(id),   -- for threaded replies
+  timestamp_ms    INTEGER,   -- timestamp in video where comment is anchored
+  content         TEXT NOT NULL,
+  is_resolved     BOOLEAN DEFAULT false,
+  created_at      TIMESTAMPTZ DEFAULT NOW(),
+  updated_at      TIMESTAMPTZ DEFAULT NOW()
+);
+
+--- EXPORTS TABLE ---
+CREATE TABLE exports (
+  id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  composition_id  UUID REFERENCES compositions(id) ON DELETE CASCADE,
+  requested_by    UUID REFERENCES users(id),
+  format          VARCHAR(20) NOT NULL,  -- mp4 | mp3 | wav | srt | vtt | txt | gif
+  resolution      VARCHAR(20),
+  quality         VARCHAR(10),
+  status          VARCHAR(30) DEFAULT 'queued',  -- queued|processing|done|failed
+  progress        INTEGER DEFAULT 0,
+  output_url      TEXT,
+  file_size_bytes BIGINT,
+  error_message   TEXT,
+  job_id          VARCHAR(255),  -- BullMQ job ID
+  created_at      TIMESTAMPTZ DEFAULT NOW(),
+  completed_at    TIMESTAMPTZ
+);
+
+--- VOICE CLONES TABLE ---
+CREATE TABLE voice_clones (
+  id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id         UUID REFERENCES users(id) ON DELETE CASCADE,
+  name            VARCHAR(255) DEFAULT 'My Voice',
+  status          VARCHAR(30) DEFAULT 'training',  -- training|ready|failed
+  training_media_id UUID REFERENCES media_files(id),
+  provider        VARCHAR(50),  -- 'elevenlabs' | 'coqui' | 'internal'
+  provider_voice_id VARCHAR(255),
+  created_at      TIMESTAMPTZ DEFAULT NOW()
+);
+
+--- LAYOUTS TEMPLATES TABLE ---
+CREATE TABLE layouts (
+  id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  name            VARCHAR(255) NOT NULL,
+  category        VARCHAR(100),   -- interview | tutorial | podcast | social
+  thumbnail_url   TEXT,
+  config          JSONB NOT NULL,  -- layer positions, sizes, styles
+  is_default      BOOLEAN DEFAULT false,
+  workspace_id    UUID,  -- null = global, uuid = workspace-specific
+  created_at      TIMESTAMPTZ DEFAULT NOW()
+);
+
+--- SHARE LINKS TABLE ---
+CREATE TABLE share_links (
+  id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  token           VARCHAR(64) UNIQUE NOT NULL,
+  project_id      UUID REFERENCES projects(id),
+  composition_id  UUID REFERENCES compositions(id),
+  created_by      UUID REFERENCES users(id),
+  permission      VARCHAR(20) DEFAULT 'view',  -- view | comment | edit
+  expires_at      TIMESTAMPTZ,
+  password_hash   TEXT,
+  view_count      INTEGER DEFAULT 0,
+  created_at      TIMESTAMPTZ DEFAULT NOW()
+);
+
+--- AUDIT LOG ---
+CREATE TABLE audit_logs (
+  id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  workspace_id    UUID,
+  user_id         UUID,
+  action          VARCHAR(100) NOT NULL,
+  resource_type   VARCHAR(50),
+  resource_id     UUID,
+  metadata        JSONB,
+  ip_address      INET,
+  created_at      TIMESTAMPTZ DEFAULT NOW()
+);
+
+--- REDIS KEY PATTERNS ---
+sessions:{userId}                    → JWT refresh token (TTL: 30d)
+ratelimit:{userId}:{endpoint}        → rate limit counter (TTL: 1min)
+project:lock:{projectId}             → editing lock (TTL: 30s, heartbeat)
+presence:{compositionId}             → Set of active user IDs
+cursor:{compositionId}:{userId}      → {x, y, timestamp} cursor position
+job:progress:{jobId}                 → transcription/export progress 0-100
+cache:project:{projectId}            → serialized project JSON (TTL: 5min)
+cache:transcript:{transcriptId}      → transcript words array (TTL: 10min)
+queue:transcription                  → BullMQ queue
+queue:export                         → BullMQ queue
+queue:media-processing               → BullMQ queue
+queue:ai-processing                  → BullMQ queue
+pubsub:composition:{compositionId}   → real-time edit events channel
+
+================================================================================
+4. BACKEND API SERVICE (Node.js + TypeScript)
+================================================================================
+
+PROJECT STRUCTURE:
+/backend
+  /src
+    /api
+      /v1
+        /auth         → login, register, refresh, oauth, logout
+        /users        → profile, settings, usage stats
+        /workspaces   → CRUD, members, invites
+        /projects     → CRUD, duplicate, archive
+        /compositions → CRUD, settings
+        /media        → upload, process, delete, search
+        /transcripts  → get, update, correct words
+        /scenes       → CRUD, reorder
+        /layers       → CRUD, update properties
+        /captions     → generate, update, export SRT/VTT
+        /comments     → CRUD, resolve, reactions
+        /exports      → create job, status, download
+        /voices       → clone creation, list, generate speech
+        /ai           → underlord, clips, summarize, translate, studio-sound
+        /publish      → publish to web, get embed code
+        /share        → create link, validate link
+        /billing      → plans, subscribe, cancel, invoices
+        /webhooks     → stripe, oauth callbacks
+    /middleware
+      auth.middleware.ts          → JWT verification
+      workspace.middleware.ts     → workspace access check
+      ratelimit.middleware.ts     → Redis-based rate limiting
+      upload.middleware.ts        → multer + TUS server
+      plan.middleware.ts          → feature gating by plan
+    /services
+      auth.service.ts
+      media.service.ts
+      transcript.service.ts
+      export.service.ts
+      ai.service.ts               → calls Python AI service
+      storage.service.ts          → S3/R2 operations
+      email.service.ts
+      stripe.service.ts
+      notification.service.ts
+    /workers
+      transcription.worker.ts     → BullMQ worker
+      export.worker.ts
+      media-processing.worker.ts
+      thumbnail.worker.ts
+    /sockets
+      composition.socket.ts       → real-time editing events
+      cursor.socket.ts            → live cursor sharing
+      presence.socket.ts          → who is online
+    /lib
+      prisma.ts                   → Prisma client singleton
+      redis.ts                    → Redis client
+      queue.ts                    → BullMQ queues
+      s3.ts                       → S3/R2 client
+      logger.ts                   → Winston logger
+    /types
+    /utils
+    app.ts
+    server.ts
+
+KEY IMPLEMENTATION DETAILS:
+
+--- RESUMABLE UPLOAD (TUS Protocol) ---
+Use @tus/server package. When upload completes:
+1. Save metadata to media_files table (status: 'processing')
+2. Push job to queue:media-processing
+3. Worker: extract thumbnail, generate waveform peaks, create HLS segments
+4. Update media_files record (status: 'ready')
+5. Emit 'media:ready' socket event to client
+
+--- TRANSCRIPTION FLOW ---
+1. Client requests transcription for media_file_id
+2. API creates transcript record (status: 'pending')
+3. Push job to queue:transcription with {transcriptId, s3Key, language}
+4. Worker calls Python AI service: POST /api/transcribe
+5. Python runs whisper-large-v3 + pyannote diarization
+6. Returns JSON: {words: [{word, start, end, speaker, confidence}]}
+7. Worker saves words to transcript_words table (bulk insert)
+8. Updates transcript status: 'ready'
+9. Emits 'transcript:ready' socket event
+10. Client fetches transcript and renders in Script Editor
+
+--- EXPORT FLOW ---
+1. Client sends export config: {compositionId, format, resolution, quality}
+2. API creates export record + pushes to queue:export
+3. Worker fetches composition, scenes, layers, transcript
+4. Builds FFmpeg command dynamically based on layers:
+   - Concatenate video clips per scene order
+   - Apply ignored words (cut those segments)
+   - Overlay captions if enabled (drawtext filter)
+   - Apply audio filters (denoise, loudnorm)
+   - Render text overlays, logos
+5. Stream progress via Redis pub/sub → client
+6. Upload output to S3, update export record
+7. Send email notification with download link
+
+================================================================================
+5. FRONTEND ARCHITECTURE (React + TypeScript)
+================================================================================
+
+PROJECT STRUCTURE:
+/frontend
+  /src
+    /app
+      /auth           → login, register, forgot-password pages
+      /dashboard      → project library (Drive view)
+      /editor
+        /[compositionId]
+          page.tsx          → main editor layout
+      /publish        → publish settings page
+      /settings       → account, workspace, billing
+      /share
+        /[token]      → public share view
+    /components
+      /editor
+        ScriptEditor.tsx      → Slate.js transcript editor
+        SceneEditor.tsx       → Canvas preview area
+        Timeline.tsx          → Custom timeline with waveform
+        Sidebar.tsx           → Right panel with tabs
+        TopBar.tsx            → Project name, tools, publish btn
+        PlaybackControls.tsx  → Play/pause, seek, volume
+        StoryboardStrip.tsx   → Scene thumbnails, drag to reorder
+        LayerProperties.tsx   → Selected element properties
+        CommentPanel.tsx      → Threaded comments
+        UnderlordPanel.tsx    → AI assistant chat
+        RecordModal.tsx       → Screen/webcam recording
+        ExportModal.tsx       → Export settings + progress
+        FillerWordHighlighter → Slate decorator for filler words
+        WaveformDisplay.tsx   → WaveSurfer.js integration
+        CaptionOverlay.tsx    → Live caption preview
+      /dashboard
+        ProjectCard.tsx
+        NewProjectModal.tsx
+        ProjectGrid.tsx
+        DriveLayout.tsx
+      /ui             → shadcn/ui component overrides
+      /shared
+        UploadZone.tsx
+        VideoPlayer.tsx
+        AudioPlayer.tsx
+        Spinner.tsx
+        Toast.tsx
+    /hooks
+      useEditor.ts        → editor state machine
+      usePlayback.ts      → playback sync logic
+      useTranscript.ts    → transcript fetch + update
+      useRealTime.ts      → socket.io connection + events
+      useRecording.ts     → MediaRecorder API wrapper
+      useUpload.ts        → TUS resumable upload
+      useExport.ts        → export job polling
+      useCollaborators.ts → online presence + cursors
+    /stores
+      editor.store.ts     → Zustand: panels, playhead, selection
+      project.store.ts    → current project + composition
+      media.store.ts      → loaded media files
+      ui.store.ts         → modals, toasts, sidepanel
+    /services
+      api.ts              → Axios instance with interceptors
+      socket.ts           → Socket.io client singleton
+      transcript.api.ts
+      media.api.ts
+      export.api.ts
+      ai.api.ts
+    /types
+      editor.types.ts
+      transcript.types.ts
+      project.types.ts
+
+--- SCRIPT EDITOR (Slate.js) IMPLEMENTATION ---
+The transcript editor is the CORE of the app. It must:
+- Render transcript words as editable rich text nodes
+- Each word node stores: {text, startMs, endMs, speakerId, isFiller, isIgnored}
+- Clicking a word → seek video playhead to word.startMs
+- As video plays → highlight current word in real-time
+- Selecting + deleting text → adds those word segments to "ignored" list
+  (does NOT delete from DB, marks as ignored, FFmpeg skips them on export)
+- Undo/Redo stack managed by Slate history plugin
+- Decorations (Slate) for:
+  → Filler words: dashed blue underline
+  → Ignored/deleted text: strikethrough + gray color
+  → Current playing word: yellow highlight background
+  → Search matches: orange highlight
+- Speaker labels: Each paragraph block has a speaker header
+  → Click speaker name → edit speaker name/color
+  → All paragraphs from that speaker update
+- Right-click context menu:
+  → Cut to timeline | Copy text | Delete | Mark as filler | Add comment
+- Floating toolbar on text selection:
+  → Cut | Delete | AI Fix (regenerate via voice clone) | Comment | Copy
+- The editor must support 50,000+ words without performance issues
+  → Use Slate's virtualization or windowing for long transcripts
+
+--- TIMELINE COMPONENT ---
+Built with canvas (konva.js or raw canvas) or react-timeline-editor:
+- Multiple tracks:
+  Track 0 (bottom): Script/Audio waveform (base track)
+  Track 1:          Video clips track
+  Track 2:          B-roll / overlay video
+  Track 3+:         Custom audio tracks
+  Track N:          Graphics / text overlays track
+- Playhead: vertical red line, draggable, synced with video
+- Scene boundaries: vertical dashed white lines, draggable to trim
+- Clip handles: drag left/right edges to trim
+- Zoom: mouse wheel or slider (range: 10px/sec to 500px/sec)
+- Mini-map: above main timeline for navigation
+- Keyboard shortcuts:
+  Space     → play/pause
+  J/K/L     → shuttle backward/pause/forward
+  ,/.       → step frame backward/forward
+  I/O       → set in/out points
+  S         → split at playhead
+  Delete    → delete selected
+  Cmd+Z     → undo
+  Cmd+Shift+Z → redo
+
+--- REAL-TIME COLLABORATION ---
+Socket events (socket.io rooms by compositionId):
+
+Client emits:
+  'cursor:move'        → {x, y} every 50ms (throttled)
+  'transcript:edit'    → {operation: 'insert'|'delete', position, text}
+  'scene:update'       → {sceneId, changes}
+  'layer:update'       → {layerId, changes}
+  'playback:seek'      → {ms} (follow-me mode)
+  'presence:ping'      → heartbeat every 10s
+
+Server emits to room (except sender):
+  'cursor:update'      → {userId, name, avatar, x, y, color}
+  'transcript:patch'   → {userId, operation, position, text}
+  'scene:patched'      → {userId, sceneId, changes}
+  'layer:patched'      → {userId, layerId, changes}
+  'user:joined'        → {userId, name, avatar}
+  'user:left'          → {userId}
+  'job:progress'       → {jobId, type, progress, status}
+
+Conflict resolution: Last-Write-Wins for most properties.
+For transcript: Operational Transformation (OT) using ot.js or Yjs (CRDT).
+STRONGLY RECOMMENDED: Use Yjs with y-socket.io for transcript collaboration.
+Yjs provides CRDT-based conflict-free merging for concurrent text edits.
+
+================================================================================
+6. AI/ML PIPELINE (Python FastAPI Service)
+================================================================================
+
+PROJECT STRUCTURE:
+/ai-service
+  /app
+    /api
+      /v1
+        transcribe.py       → Whisper transcription endpoint
+        diarize.py          → Speaker diarization
+        filler_words.py     → Detect filler words
+        silence.py          → Detect silence segments
+        studio_sound.py     → Audio enhancement
+        voice_clone.py      → Train + generate voice
+        summarize.py        → GPT/Claude summarization
+        clips.py            → AI clip detection
+        translate.py        → Caption translation
+        background.py       → Remove background
+        ai_edit.py          → Underlord: AI-driven edit actions
+    /models
+      whisper_model.py      → Whisper singleton loader
+      diarization_model.py  → pyannote pipeline
+      denoiser_model.py     → DeepFilterNet
+      clip_detector.py      → Custom transformer model
+    /workers
+      transcription_worker.py
+      clip_worker.py
+    /utils
+      ffmpeg_utils.py
+      audio_utils.py
+    main.py
+    config.py
+
+--- TRANSCRIPTION ENDPOINT (POST /api/v1/transcribe) ---
+Input: {s3_key, language, enable_diarization, num_speakers}
+Process:
+  1. Download audio from S3 to temp file
+  2. If video: extract audio with ffmpeg
+  3. Run whisper-large-v3 with word_timestamps=True
+  4. If enable_diarization: run pyannote.audio pipeline
+  5. Align diarization segments with whisper words
+  6. Detect filler words using spaCy (um, uh, like, you know, basically, etc.)
+  7. Return {words, speakers, language, duration, confidence}
+Output: Full word-level transcript with speaker labels and timestamps
+
+--- FILLER WORD DETECTION ---
+Method: spaCy token matching + custom regex patterns
+Filler list: um, uh, like, you know, basically, literally, actually, right?,
+             so, I mean, kind of, sort of, you see, well, okay, alright
+Also detect: repeated words (the the), stutters (I-I-I), long silences
+Return: List of word indices that are filler
+
+--- SILENCE DETECTION ---
+Method: librosa + WebRTC VAD
+1. Load audio with librosa
+2. Run VAD to detect speech segments
+3. Invert to get silence segments
+4. Filter by min_silence_duration (default 500ms)
+5. Return list of {start_ms, end_ms} silence segments
+6. Client can "Remove Silences" which ignores these in editor
+
+--- STUDIO SOUND (Audio Enhancement) ---
+Method: DeepFilterNet (state-of-art speech denoiser)
+1. Load audio segment
+2. Run DeepFilterNet model
+3. Apply loudness normalization (EBU R128 via pyloudnorm)
+4. Export enhanced audio
+5. Upload to S3, return new s3_key
+
+--- AI CLIPS DETECTION ---
+Method: Custom transformer + OpenAI embeddings
+1. Get full transcript text + timestamps
+2. Chunk into segments with sliding window
+3. Compute embeddings for each chunk
+4. Score each chunk on:
+   - Semantic density (information per second)
+   - Sentiment peaks (excitement, emotion)
+   - Speaker energy (audio amplitude peaks)
+   - Topic transitions (embedding distance)
+5. Score segments, pick top N by score
+6. For each: generate thumbnail, title, description
+7. Return clips: [{start_ms, end_ms, score, suggested_title, ...}]
+
+--- VOICE CLONE (OVERDUB) ---
+Method: ElevenLabs API (recommended) or Coqui TTS
+1. User uploads 30+ seconds of their voice (clean audio)
+2. Send to ElevenLabs voice cloning API
+3. Store voice_id in voice_clones table
+To generate speech:
+1. User selects word in transcript, types replacement
+2. Call ElevenLabs TTS with voice_id + replacement text
+3. Get audio blob, trim to fit word duration
+4. Upload to S3
+5. Create audio layer in timeline at word's timestamp
+6. Original word marked as "overdubbed" in transcript
+
+--- TRANSLATION ---
+Method: DeepL API (best quality) or Helsinki-NLP models
+Input: {transcript_words, target_language}
+Process:
+1. Group words into sentences
+2. Send sentences to DeepL API
+3. Align translated sentences back to timestamps
+4. Create new caption set in target language
+Supported: 20+ languages (EN, ES, FR, DE, JA, ZH, HI, PT, etc.)
+
+--- UNDERLORD AI ASSISTANT ---
+Model: GPT-4o or Claude 3.5 Sonnet via API
+System prompt includes:
+  - Full transcript text
+  - Current composition structure
+  - Available edit operations as function calls
+Function tools available to the LLM:
+  - remove_filler_words(threshold: float)
+  - remove_silences(min_duration_ms: int)
+  - generate_captions(style: string)
+  - create_highlight_clip(duration_seconds: int)
+  - tighten_pacing(target_wpm: int)
+  - summarize_transcript()
+  - find_best_moments(topic: string, count: int)
+  - add_intro_card(text: string)
+  - normalize_audio()
+  - generate_title_and_description()
+When LLM calls a function → execute it → apply changes to composition
+Return: {message, operations_performed, new_composition_state}
+
+================================================================================
+7. MEDIA PROCESSING PIPELINE
+================================================================================
+
+--- HLS STREAMING SETUP ---
+After upload, convert video to HLS:
+  ffmpeg -i input.mp4 \
+    -c:v libx264 -crf 22 -preset fast \
+    -c:a aac -b:a 128k \
+    -hls_time 6 \
+    -hls_playlist_type vod \
+    -hls_segment_filename 'segment_%03d.ts' \
+    output.m3u8
+Upload all .ts segments + .m3u8 to S3
+Use CloudFront signed URLs for secure streaming
+
+--- WAVEFORM GENERATION ---
+  audiowaveform -i input.mp3 -o waveform.json \
+    --pixels-per-second 100 --bits 8
+Store peaks array in media_files.waveform_data (JSONB)
+Client uses this to render WaveSurfer.js without re-fetching audio
+
+--- THUMBNAIL EXTRACTION ---
+  ffmpeg -i input.mp4 -ss 00:00:02 -vframes 1 -q:v 2 thumbnail.jpg
+Generate at: 2s, 25%, 50%, 75% timestamps
+Resize to: 320x180, 640x360, 1280x720
+
+--- EXPORT PIPELINE (FFmpeg command builder) ---
+The export worker dynamically builds an FFmpeg command:
+1. Collect all "active" scenes (not deleted)
+2. For each scene, collect clips in order
+3. Build filter_complex for:
+   - Concatenation: [0:v][1:v][2:v]concat=n=3:v=1:a=0[outv]
+   - Caption overlay: drawtext=text='...':fontsize=36:y=h-th-50
+   - Logo overlay: [outv][logo]overlay=10:10[final]
+   - Audio mixing: amix=inputs=2:duration=first
+4. Apply ignored word segments as trim cuts
+5. Run FFmpeg with progress callback
+6. Stream progress percentage to Redis pub/sub
+7. Upload output file to S3 with signed URL (7-day expiry)
+
+================================================================================
+8. AUTHENTICATION & AUTHORIZATION
+================================================================================
+
+--- AUTH FLOW ---
+1. Register: email + password → hash with bcrypt (rounds: 12) → save user
+2. Login: verify password → generate:
+   - Access Token: JWT, expires 15 minutes, contains {userId, workspaceId, plan}
+   - Refresh Token: opaque random string (64 chars), expires 30 days
+   - Store refresh token hash in Redis: sessions:{userId} = token_hash
+3. Token Refresh: POST /api/v1/auth/refresh
+   - Verify refresh token exists in Redis
+   - Issue new access + refresh token pair
+   - Rotate refresh token (delete old, store new)
+4. Logout: DELETE refresh token from Redis
+5. OAuth (Google):
+   - Redirect to Google OAuth URL
+   - Callback: create/find user by email
+   - Issue same JWT pair
+
+--- AUTHORIZATION LEVELS ---
+Public:              Share link viewers (read-only, no auth required)
+Free User:           Own workspace only, limited features
+Pro User:            All AI features, larger storage
+Team Admin:          Manage workspace members, billing
+Team Owner:          Full control, delete workspace
+Platform Admin:      Internal staff, all workspaces (separate admin portal)
+
+--- PLAN FEATURE GATING (middleware) ---
+requirePlan('pro') middleware checks:
+  - user.plan from JWT claim
+  - Stripe subscription status (cached in Redis 5 min)
+  - If insufficient plan → 403 with upgrade prompt
+
+================================================================================
+9. QUEUE & WORKER SYSTEM (BullMQ + Redis)
+================================================================================
+
+QUEUES:
+1. queue:media-processing
+   → Generate thumbnail, waveform, HLS segments
+   → Concurrency: 3 workers
+   → Timeout: 10 minutes
+
+2. queue:transcription
+   → Download audio, run Whisper, save words
+   → Concurrency: 2 workers (GPU-intensive)
+   → Timeout: 30 minutes
+
+3. queue:export
+   → Build + run FFmpeg export command
+   → Concurrency: 2 workers
+   → Timeout: 60 minutes
+
+4. queue:ai-processing
+   → Clip detection, studio sound, background removal
+   → Concurrency: 2 workers
+   → Timeout: 20 minutes
+
+5. queue:notifications
+   → Email, in-app notifications
+   → Concurrency: 10 workers
+   → Timeout: 30 seconds
+
+RETRY POLICY: 3 attempts with exponential backoff (2s, 4s, 8s)
+DEAD LETTER: Failed jobs moved to {queueName}:failed after max retries
+MONITORING: Bull Board UI at /admin/queues (protected route)
+
+================================================================================
+10. PAYMENTS (Stripe Integration)
+================================================================================
+
+PLANS:
+  Free:    $0/mo    → 30 min transcription/mo, 5GB storage, 3 projects
+  Creator: $15/mo   → 300 min transcription/mo, 50GB storage, unlimited projects,
+                       AI clips, captions, filler removal, studio sound
+  Pro:     $30/mo   → 1000 min/mo, 200GB storage, voice clone, translation,
+                       green screen, team sharing (up to 3 seats)
+  Team:    $50/seat → Everything in Pro, unlimited seats, SSO, API access,
+                       priority support, custom branding
+
+STRIPE WEBHOOKS TO HANDLE:
+  customer.subscription.created    → upgrade user plan
+  customer.subscription.updated    → update plan/limits
+  customer.subscription.deleted    → downgrade to free
+  invoice.payment_failed           → send dunning email, grace period 7 days
+  invoice.payment_succeeded        → reset monthly usage counters
+
+METERED BILLING:
+  Transcription minutes: tracked in users.transcription_minutes_used
+  Reset monthly via Stripe billing period webhook
+  Overage: $0.05/minute over limit (Stripe metered billing)
+
+================================================================================
+11. DEVOPS & INFRASTRUCTURE
+================================================================================
+
+--- DOCKER COMPOSE (Development) ---
+version: '3.9'
+services:
+  postgres:
+    image: postgres:15
+    environment:
+      POSTGRES_DB: descriptclone
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: password
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+
+  elasticsearch:
+    image: elasticsearch:8.11.0
+    environment:
+      - discovery.type=single-node
+      - xpack.security.enabled=false
+    ports:
+      - "9200:9200"
+
+  backend:
+    build: ./backend
+    environment:
+      - DATABASE_URL=postgresql://postgres:password@postgres:5432/descriptclone
+      - REDIS_URL=redis://redis:6379
+    ports:
+      - "3001:3001"
+    depends_on:
+      - postgres
+      - redis
+
+  ai-service:
+    build: ./ai-service
+    ports:
+      - "8000:8000"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              capabilities: [gpu]  # optional GPU
+
+  frontend:
+    build: ./frontend
+    ports:
+      - "3000:3000"
+
+--- KUBERNETES (Production) ---
+Namespaces:    production, staging, monitoring
+Deployments:   backend (3 replicas), ai-service (2 replicas),
+               frontend (3 replicas, static via CDN recommended),
+               worker (transcription: 2, export: 2, media: 3)
+Services:      ClusterIP for internal, LoadBalancer for public
+Ingress:       Nginx Ingress Controller with SSL termination
+HPA:           Autoscale workers based on queue depth (KEDA)
+Secrets:       Kubernetes Secrets (backed by AWS Secrets Manager)
+PVC:           For temporary FFmpeg working files (fast SSD)
+
+--- CI/CD (GitHub Actions) ---
+On push to main:
+  1. Run tests (Jest + Playwright)
+  2. Docker build + push to ECR
+  3. Prisma migrate (production DB)
+  4. kubectl rollout update (zero-downtime)
+  5. Notify Slack on success/failure
+
+--- AWS RESOURCES (via Terraform) ---
+  VPC with public/private subnets
+  EKS cluster (3 node groups: general, compute-optimized, GPU)
+  RDS PostgreSQL (Multi-AZ)
+  ElastiCache Redis (cluster mode)
+  S3 buckets: media-uploads, exports, thumbnails, hls-segments
+  CloudFront distributions: media CDN, app CDN
+  ECR repositories: backend, ai-service, frontend, workers
+  SES: transactional emails
+  CloudWatch: logs, alarms
+
+================================================================================
+12. MONITORING & OBSERVABILITY
+================================================================================
+
+SENTRY:
+  - Frontend: React error boundary + performance tracing
+  - Backend: Express error handler integration
+  - Source maps uploaded on deploy
+
+PROMETHEUS METRICS TO TRACK:
+  http_request_duration_seconds   → API latency histogram
+  queue_job_duration_seconds      → Worker job duration
+  active_websocket_connections    → Real-time users
+  transcription_minutes_processed → Business metric
+  export_jobs_total               → by status (success/fail)
+  media_upload_bytes_total        → Storage tracking
+
+GRAFANA DASHBOARDS:
+  - API Health (p50/p95/p99 latency, error rate, RPS)
+  - Queue Health (depth, throughput, failure rate per queue)
+  - AI Service (GPU utilization, model inference time)
+  - Business Metrics (signups, transcription usage, exports)
+
+ALERTS:
+  - API error rate > 1% → PagerDuty
+  - Queue depth > 100 jobs → Slack warning
+  - Export job failure rate > 5% → PagerDuty
+  - DB connection pool > 80% → Slack
+  - Storage bucket 80% full → Email
+
+================================================================================
+13. DETAILED FEATURE LIST WITH PRIORITY
+================================================================================
+
+PHASE 1 — MVP (Months 1-3):
+  ✅ User auth (email/password + Google OAuth)
+  ✅ Workspace + project management
+  ✅ Video/audio file upload (TUS resumable)
+  ✅ Auto-transcription (Whisper)
+  ✅ Script Editor (Slate.js) with word-click seeking
+  ✅ Basic video preview player
+  ✅ Delete/ignore words (cut on export)
+  ✅ Filler word detection + removal
+  ✅ Silence detection + removal
+  ✅ Export: MP4, MP3, SRT, TXT
+  ✅ Basic share link (view only)
+  ✅ Free plan limits
+
+PHASE 2 — Core Features (Months 3-5):
+  ✅ Speaker diarization (multi-speaker labeling)
+  ✅ Scene editor (canvas preview, visual layers)
+  ✅ Timeline panel (waveform, clip handles)
+  ✅ Auto captions (burn-in or SRT/VTT)
+  ✅ Studio Sound (denoising)
+  ✅ Basic layouts/templates
+  ✅ Comments + collaboration (comment-only share)
+  ✅ Stripe payments + plan gating
+  ✅ Screen recorder (browser MediaRecorder API)
+  ✅ Webcam recorder
+
+PHASE 3 — AI & Collaboration (Months 5-8):
+  ✅ Real-time collaborative editing (Yjs)
+  ✅ Live cursors + presence
+  ✅ Voice cloning / Overdub (ElevenLabs)
+  ✅ AI Clips detection
+  ✅ AI Underlord assistant
+  ✅ Caption translation (20+ languages)
+  ✅ Green screen / background removal
+  ✅ Stock media library integration (Pexels/Pixabay API)
+  ✅ Publish to web (standalone page)
+  ✅ Team workspaces + invites
+
+PHASE 4 — Advanced & Scale (Months 8-12):
+  ✅ Mobile app (React Native)
+  ✅ API access for developers
+  ✅ Zapier/Make.com integrations
+  ✅ Direct publishing: YouTube, LinkedIn, TikTok
+  ✅ Advanced analytics (view counts, engagement)
+  ✅ Teleprompter mode
+  ✅ Custom branding (Team plan)
+  ✅ SSO / SAML (Enterprise)
+  ✅ Webhooks for automation
+
+================================================================================
+14. API ENDPOINT REFERENCE
+================================================================================
+
+--- AUTH ---
+POST   /api/v1/auth/register
+POST   /api/v1/auth/login
+POST   /api/v1/auth/refresh
+DELETE /api/v1/auth/logout
+GET    /api/v1/auth/me
+GET    /api/v1/auth/google               → OAuth redirect
+GET    /api/v1/auth/google/callback
+
+--- PROJECTS ---
+GET    /api/v1/workspaces/:id/projects   → list all projects
+POST   /api/v1/workspaces/:id/projects   → create project
+GET    /api/v1/projects/:id
+PATCH  /api/v1/projects/:id
+DELETE /api/v1/projects/:id
+POST   /api/v1/projects/:id/duplicate
+POST   /api/v1/projects/:id/archive
+
+--- COMPOSITIONS ---
+GET    /api/v1/projects/:id/compositions
+POST   /api/v1/projects/:id/compositions
+GET    /api/v1/compositions/:id
+PATCH  /api/v1/compositions/:id
+DELETE /api/v1/compositions/:id
+
+--- MEDIA ---
+POST   /api/v1/media/upload              → initiate TUS upload
+GET    /api/v1/workspaces/:id/media      → media library
+GET    /api/v1/media/:id
+DELETE /api/v1/media/:id
+POST   /api/v1/media/:id/transcribe      → start transcription job
+
+--- TRANSCRIPTS ---
+GET    /api/v1/transcripts/:id           → full transcript with words
+PATCH  /api/v1/transcripts/:id/words     → bulk update words (ignore, correct)
+POST   /api/v1/transcripts/:id/ignore    → ignore word range
+POST   /api/v1/transcripts/:id/restore   → restore ignored range
+
+--- SCENES ---
+GET    /api/v1/compositions/:id/scenes
+POST   /api/v1/compositions/:id/scenes
+PATCH  /api/v1/scenes/:id
+DELETE /api/v1/scenes/:id
+POST   /api/v1/compositions/:id/scenes/reorder
+
+--- LAYERS ---
+GET    /api/v1/scenes/:id/layers
+POST   /api/v1/scenes/:id/layers
+PATCH  /api/v1/layers/:id
+DELETE /api/v1/layers/:id
+
+--- EXPORTS ---
+POST   /api/v1/compositions/:id/exports  → start export job
+GET    /api/v1/exports/:id               → job status + progress
+GET    /api/v1/exports/:id/download      → redirect to S3 presigned URL
+
+--- AI ---
+POST   /api/v1/ai/filler-words           → detect + return positions
+POST   /api/v1/ai/remove-fillers         → apply removal to composition
+POST   /api/v1/ai/remove-silences
+POST   /api/v1/ai/studio-sound
+POST   /api/v1/ai/generate-captions
+POST   /api/v1/ai/translate-captions
+POST   /api/v1/ai/detect-clips
+POST   /api/v1/ai/summarize
+POST   /api/v1/ai/underlord              → conversational AI editing
+POST   /api/v1/ai/background-remove
+
+--- VOICE CLONE ---
+POST   /api/v1/voices/clone              → train voice model
+GET    /api/v1/voices                    → list user's voice clones
+POST   /api/v1/voices/:id/generate       → generate speech for overdub
+DELETE /api/v1/voices/:id
+
+--- COMMENTS ---
+GET    /api/v1/compositions/:id/comments
+POST   /api/v1/compositions/:id/comments
+PATCH  /api/v1/comments/:id
+DELETE /api/v1/comments/:id
+POST   /api/v1/comments/:id/resolve
+
+--- SHARE ---
+POST   /api/v1/share                     → create share link
+GET    /api/v1/share/:token              → validate + get public data
+PATCH  /api/v1/share/:token              → update permissions
+
+--- BILLING ---
+GET    /api/v1/billing/plans
+POST   /api/v1/billing/subscribe
+POST   /api/v1/billing/cancel
+GET    /api/v1/billing/invoices
+POST   /api/v1/billing/portal            → Stripe billing portal redirect
+
+================================================================================
+15. ENVIRONMENT VARIABLES
+================================================================================
+
+--- BACKEND ---
+NODE_ENV=production
+PORT=3001
+DATABASE_URL=postgresql://user:pass@host:5432/dbname
+REDIS_URL=redis://host:6379
+JWT_SECRET=<64-char-random-string>
+JWT_REFRESH_SECRET=<64-char-random-string>
+JWT_ACCESS_EXPIRY=15m
+JWT_REFRESH_EXPIRY=30d
+
+# Storage
+AWS_ACCESS_KEY_ID=
+AWS_SECRET_ACCESS_KEY=
+AWS_REGION=us-east-1
+S3_BUCKET_MEDIA=your-media-bucket
+S3_BUCKET_EXPORTS=your-exports-bucket
+CLOUDFRONT_DOMAIN=https://cdn.yourdomain.com
+
+# Auth
+GOOGLE_CLIENT_ID=
+GOOGLE_CLIENT_SECRET=
+GOOGLE_CALLBACK_URL=https://api.yourdomain.com/api/v1/auth/google/callback
+
+# Payments
+STRIPE_SECRET_KEY=sk_live_...
+STRIPE_WEBHOOK_SECRET=whsec_...
+STRIPE_PRICE_ID_CREATOR=price_...
+STRIPE_PRICE_ID_PRO=price_...
+STRIPE_PRICE_ID_TEAM=price_...
+
+# Email
+RESEND_API_KEY=re_...
+FROM_EMAIL=noreply@yourdomain.com
+
+# Internal service communication
+AI_SERVICE_URL=http://ai-service:8000
+AI_SERVICE_API_KEY=<internal-key>
+
+# Frontend
+FRONTEND_URL=https://app.yourdomain.com
+CORS_ORIGINS=https://app.yourdomain.com,https://yourdomain.com
+
+--- AI SERVICE ---
+OPENAI_API_KEY=sk-...
+ANTHROPIC_API_KEY=sk-ant-...
+ELEVENLABS_API_KEY=...
+DEEPL_API_KEY=...
+WHISPER_MODEL_SIZE=large-v3
+WHISPER_DEVICE=cuda  # or cpu
+HF_TOKEN=hf_...  # HuggingFace token for pyannote
+AWS_ACCESS_KEY_ID=
+AWS_SECRET_ACCESS_KEY=
+AWS_REGION=us-east-1
+S3_BUCKET_MEDIA=your-media-bucket
+REDIS_URL=redis://host:6379
+
+--- FRONTEND ---
+VITE_API_URL=https://api.yourdomain.com
+VITE_SOCKET_URL=wss://api.yourdomain.com
+VITE_SENTRY_DSN=https://...@sentry.io/...
+VITE_STRIPE_PUBLISHABLE_KEY=pk_live_...
+VITE_GOOGLE_CLIENT_ID=
+
+================================================================================
+16. PHASE-BY-PHASE BUILD ORDER (Recommended)
+================================================================================
+
+WEEK 1-2: Foundation
+  - Set up monorepo (pnpm workspaces or Turborepo)
+  - Docker Compose with postgres + redis
+  - Backend: Express + Prisma setup, initial migrations
+  - Frontend: React + Vite + Tailwind + Router setup
+  - Auth: register/login/refresh endpoints + JWT middleware
+  - Frontend: auth pages + protected routes
+
+WEEK 3-4: Projects & Upload
+  - Project CRUD API + frontend project dashboard
+  - TUS upload server + S3 integration
+  - Media processing worker (thumbnail, waveform, HLS)
+  - File upload UI with progress + drag/drop
+
+WEEK 5-6: Transcription
+  - AI Service setup (FastAPI + Docker)
+  - Whisper transcription endpoint
+  - Transcription worker (BullMQ)
+  - Transcript storage (transcript_words table)
+  - Transcript fetch API
+
+WEEK 7-8: Script Editor
+  - Slate.js editor setup with custom word nodes
+  - Render transcript words in editor
+  - Word click → video seek
+  - Playback highlighting (current word)
+  - Delete/ignore words logic
+  - Undo/redo
+
+WEEK 9-10: Video Player + Timeline
+  - Video player (HLS streaming)
+  - Playback controls (play/pause/seek/volume)
+  - WaveSurfer.js waveform
+  - Basic timeline panel (scenes, playhead)
+  - Scene boundaries
+
+WEEK 11-12: Scene Editor
+  - Canvas-based scene preview
+  - Text overlay layers
+  - Image/logo overlay
+  - Storyboard strip
+
+WEEK 13-14: Export
+  - FFmpeg export worker
+  - MP4/MP3/SRT export
+  - Progress streaming via Redis/Socket.io
+  - Export modal UI
+
+WEEK 15-16: AI Features (Batch 1)
+  - Filler word detection + removal
+  - Silence detection + removal
+  - Studio Sound (audio denoiser)
+  - Auto captions
+
+WEEK 17-18: Collaboration
+  - Yjs integration for transcript
+  - Socket.io rooms per composition
+  - Live cursors
+  - Presence (who's online)
+  - Comments panel
+
+WEEK 19-20: Payments & Plans
+  - Stripe integration
+  - Plan gating middleware
+  - Billing page UI
+  - Usage tracking
+
+WEEK 21-24: Advanced AI
+  - Voice cloning (ElevenLabs)
+  - AI Clips detection
+  - Underlord AI assistant
+  - Caption translation
+  - Green screen removal
+
+WEEK 25-28: Polish & Production
+  - Error boundaries + Sentry
+  - Prometheus + Grafana
+  - Load testing (k6)
+  - Security audit
+  - Kubernetes deployment
+  - CI/CD pipeline
+  - Performance optimization
+
+================================================================================
+                          END OF PROMPT
+================================================================================
+Estimated Team Size: 4-6 engineers
+  - 1 Full Stack Lead (architecture + core API)
+  - 1 Frontend Engineer (React + Slate.js + Canvas)
+  - 1 Backend Engineer (API + queues + media pipeline)
+  - 1 ML/AI Engineer (Python service + models)
+  - 1 DevOps Engineer (infra + CI/CD + monitoring)
+  - 1 QA Engineer (testing + automation)
+
+Estimated Timeline: 6-9 months to MVP, 12-18 months to full product
+Estimated Cloud Cost (MVP scale): $200-400/month (AWS)
+Estimated Cloud Cost (1000 users): $800-1500/month
+================================================================================

@@ -766,6 +766,65 @@ class AgentTaskProcessorTest {
     }
 
     @Test
+    void runtimeVerifierFailureRedispatchesADeveloperFixThenPasses() {
+        var verifierRuns = new java.util.concurrent.atomic.AtomicInteger();
+        var devRuns = new java.util.concurrent.atomic.AtomicInteger();
+        AtomicReference<Agent.Request> devReq = new AtomicReference<>();
+        Agent verifier = new Agent() {
+            @Override public AgentId id() { return new AgentId("rv"); }
+            @Override public AgentRole role() { return AgentRole.RUNTIME_VERIFIER; }
+            @Override public Set<Capability> capabilities() { return Set.of(Capability.RUN_TESTS); }
+            @Override public boolean canHandle(Task task) { return true; }
+            @Override public Response handle(Request request, Context context) {
+                // First boot-and-probe fails; after the developer fixes it, the re-verify passes.
+                boolean firstRun = verifierRuns.incrementAndGet() == 1;
+                return firstRun
+                        ? new Response(Outcome.NEEDS_REVIEW, Map.of("checks", "GET /health -> 500"),
+                                List.of(), Confidence.HIGH, List.of(), Optional.of("app fails to boot: /health 500"))
+                        : new Response(Outcome.COMPLETED, Map.of("summary", "app boots, flows pass"),
+                                List.of(), Confidence.HIGH, List.of(), Optional.empty());
+            }
+        };
+        Agent dev = new Agent() {
+            @Override public AgentId id() { return new AgentId("dev"); }
+            @Override public AgentRole role() { return AgentRole.BACKEND_DEVELOPER; }
+            @Override public Set<Capability> capabilities() { return Set.of(Capability.WRITE_CODE); }
+            @Override public boolean canHandle(Task task) { return true; }
+            @Override public Response handle(Request request, Context context) {
+                devRuns.incrementAndGet();
+                devReq.set(request);
+                return new Response(Outcome.COMPLETED, Map.of("summary", "fixed boot"), List.of(),
+                        Confidence.HIGH, List.of(), Optional.empty());
+            }
+        };
+        AgentFactory factory = new AgentFactory() {
+            @Override public Agent create(AgentRole role) {
+                return role == AgentRole.RUNTIME_VERIFIER ? verifier : dev;
+            }
+            @Override public boolean supports(AgentRole role) {
+                return role == AgentRole.RUNTIME_VERIFIER || role == AgentRole.BACKEND_DEVELOPER;
+            }
+            @Override public Set<AgentRole> supportedRoles() {
+                return Set.of(AgentRole.RUNTIME_VERIFIER, AgentRole.BACKEND_DEVELOPER);
+            }
+        };
+        AgentTaskProcessor processor = new AgentTaskProcessor(
+                factory, new JGitArtifactRepository(repoDir), new InMemoryAuditLog(),
+                ".", List.of("./gradlew", "test"), 2);
+
+        Task verifyTask = new Task(new TaskId("rv1"), "Verify runtime", "boot and probe",
+                AgentRole.RUNTIME_VERIFIER, WorkflowState.PENDING, List.of(), Map.of(),
+                Instant.now(), Instant.now());
+        Agent.Response r = processor.process("p1", verifyTask);
+
+        assertEquals(Agent.Outcome.COMPLETED, r.outcome(), "ends green once the app boots");
+        assertEquals(2, verifierRuns.get(), "verifier runs again to confirm the fix");
+        assertEquals(1, devRuns.get(), "a developer is dispatched to fix the failing runtime");
+        assertTrue(devReq.get().inputArtifacts().getOrDefault("buildFailure", "").contains("/health 500"),
+                "the developer gets the runtime failure detail as grounding");
+    }
+
+    @Test
     void codeReviewerReceivesTheActualCommittedFileContents() {
         JGitArtifactRepository repo = new JGitArtifactRepository(repoDir);
         repo.write(new ArtifactRepository.WriteRequest("t0", "BACKEND_DEVELOPER", "scaffold",

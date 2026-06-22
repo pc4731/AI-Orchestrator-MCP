@@ -51,6 +51,23 @@ class FileProjectWorkspacesTest {
     }
 
     @Test
+    void existingForNameReportsACollisionSoCallersCanOfferEditInPlace(@TempDir Path base) {
+        FileProjectWorkspaces workspaces = new FileProjectWorkspaces(base, true, ".project/knowledge.md");
+
+        // No folder yet -> the name is free.
+        assertTrue(workspaces.existingForName("Marketing Agent").isEmpty());
+
+        // After a build creates marketing-agent/, the same name (any casing/spacing -> same slug) collides.
+        workspaces.open("p1", "Marketing Agent");
+        Optional<Path> hit = workspaces.existingForName("marketing agent");
+        assertTrue(hit.isPresent());
+        assertEquals(base.resolve("marketing-agent").toAbsolutePath().normalize(), hit.get());
+
+        assertTrue(workspaces.existingForName(null).isEmpty());
+        assertTrue(workspaces.existingForName("  ").isEmpty());
+    }
+
+    @Test
     void directoryOfDoesNotCreateAWorkspace(@TempDir Path base) {
         FileProjectWorkspaces workspaces = new FileProjectWorkspaces(base, true, ".project/knowledge.md");
 

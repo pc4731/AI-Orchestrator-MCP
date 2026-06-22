@@ -41,4 +41,13 @@ public interface ProjectWorkspaces {
 
     /** The directory of an already-open workspace, or empty if none was opened — never creates one. */
     java.util.Optional<String> directoryOf(String projectId);
+
+    /**
+     * The existing folder a fresh build named {@code name} would collide with (same slug already on
+     * disk), or empty if the name is free. Lets a caller offer edit-in-place instead of silently
+     * creating a {@code -2} copy. Default: no collision (for implementations without on-disk folders).
+     */
+    default java.util.Optional<java.nio.file.Path> existingForName(String name) {
+        return java.util.Optional.empty();
+    }
 }

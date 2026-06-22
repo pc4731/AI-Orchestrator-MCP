@@ -62,7 +62,91 @@ public class SkillRegistry {
         if (role != null && get(learnedName(role)).isPresent()) {
             all.add(learnedName(role));
         }
+        all.addAll(attachedNames(role)); // approved, researched domain skills attached to this role
         return resolve(all);
+    }
+
+    /**
+     * Persist an approved, researched skill: write its content as a named skill file and attach it to
+     * each given role so {@link #resolveForRole} folds it into that role's prompt — from the next agent
+     * created onward, including later in the SAME run. The file persists, so a future run that needs
+     * the same domain reuses it without re-researching. Returns the slug the skill was saved under.
+     */
+    public String addSynthesizedSkill(String name, String content, java.util.Collection<AgentRole> roles) {
+        String slug = slugify(name);
+        if (slug.isBlank() || content == null || content.isBlank()) {
+            return "";
+        }
+        try {
+            Files.createDirectories(dir);
+            Files.writeString(dir.resolve(slug + ".md"), content.strip() + "\n",
+                    StandardCharsets.UTF_8, StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING);
+        } catch (IOException e) {
+            throw new SkillWriteException("Failed to write synthesized skill " + slug, e);
+        }
+        if (roles != null) {
+            for (AgentRole role : roles) {
+                attach(role, slug);
+            }
+        }
+        return slug;
+    }
+
+    /** Record (idempotently) that {@code skillName} is attached to {@code role} at
+     *  {@code <dir>/attachments/<ROLE>.txt} — one skill name per line. */
+    private void attach(AgentRole role, String skillName) {
+        if (role == null || skillName == null || skillName.isBlank()) {
+            return;
+        }
+        Path path = dir.resolve("attachments").resolve(role.name() + ".txt");
+        try {
+            List<String> names = attachedNames(role);
+            if (names.contains(skillName)) {
+                return; // already attached
+            }
+            List<String> updated = new ArrayList<>(names);
+            updated.add(skillName);
+            if (path.getParent() != null) {
+                Files.createDirectories(path.getParent());
+            }
+            Files.write(path, updated, StandardCharsets.UTF_8,
+                    StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING);
+        } catch (IOException e) {
+            throw new SkillWriteException("Failed to attach skill " + skillName + " to " + role, e);
+        }
+    }
+
+    /** Skill names attached to a role via {@link #addSynthesizedSkill}. */
+    public List<String> attachedNames(AgentRole role) {
+        if (role == null) {
+            return List.of();
+        }
+        Path path = dir.resolve("attachments").resolve(role.name() + ".txt");
+        if (!Files.isRegularFile(path)) {
+            return List.of();
+        }
+        try {
+            List<String> names = new ArrayList<>();
+            for (String line : Files.readAllLines(path)) {
+                String n = line.strip();
+                if (!n.isBlank() && !names.contains(n)) {
+                    names.add(n);
+                }
+            }
+            return names;
+        } catch (IOException e) {
+            return List.of();
+        }
+    }
+
+    /** A filesystem-safe skill slug derived from a free-text name. */
+    static String slugify(String name) {
+        if (name == null) {
+            return "";
+        }
+        return name.toLowerCase(java.util.Locale.ROOT)
+                .replaceAll("[^a-z0-9]+", "-")
+                .replaceAll("(^-+|-+$)", "");
     }
 
     /** Append an approved lesson to the role's learned-skill file (creating it). The git-tracked file

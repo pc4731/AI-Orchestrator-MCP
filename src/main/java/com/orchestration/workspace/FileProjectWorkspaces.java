@@ -129,6 +129,17 @@ public class FileProjectWorkspaces implements ProjectWorkspaces {
         return ws == null ? Optional.empty() : Optional.of(ws.dir());
     }
 
+    @Override
+    public Optional<Path> existingForName(String name) {
+        if (name == null || name.isBlank()) {
+            return Optional.empty();
+        }
+        // A fresh build names its folder slugify(name); if that exact folder already exists, naming
+        // would slide to a -2 copy. Report the collision so the caller can offer edit-in-place instead.
+        Path dir = baseDir.resolve(slugify(name));
+        return Files.isDirectory(dir) ? Optional.of(dir.toAbsolutePath().normalize()) : Optional.empty();
+    }
+
     private Workspace build(Path dir) {
         try {
             Files.createDirectories(dir);

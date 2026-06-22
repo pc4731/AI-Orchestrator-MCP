@@ -149,6 +149,10 @@ async function init() {
   } else {
     $('go').addEventListener('click', submit);
     $('req').addEventListener('keydown', e => { if (e.key === 'Enter') submit(); });
+    // Refresh recovery: the running project lives server-side (status/graph come from checkpoints),
+    // only this page's `currentId` was lost on reload. Re-attach to the active project so a refresh
+    // (or a freshly opened tab) shows the live run instead of resetting to "No project running".
+    pollActive();
   }
   // Fade the active banner back to idle if nothing happens for a while.
   setInterval(() => { if (activeRole && Date.now() - lastActiveAt > 8000) setIdle(); }, 2000);
@@ -162,8 +166,12 @@ async function init() {
 async function pollActive() {
   try {
     const { projectId } = await fetch('/api/active').then(r => r.json());
-    // Don't re-attach to a project we already detached as gone (avoids a slow re-attach/404 loop).
-    if (projectId && projectId !== currentId && projectId !== deadId) attach(projectId);
+    if (!projectId || projectId === currentId) return;          // nothing running, or already attached
+    // The server's /api/active is authoritative about what is running. If we previously marked this
+    // project dead (a transient 404 during planning, or a brief server blip), trust the server and
+    // re-attach — otherwise the view would stay stuck until the user manually refreshes the page.
+    if (projectId === deadId) deadId = null;
+    attach(projectId);
   } catch (e) {}
 }
 

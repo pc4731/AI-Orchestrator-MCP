@@ -52,6 +52,31 @@ class JGitArtifactRepositoryTest {
     }
 
     @Test
+    void listExcludesGitignoredPaths() throws java.io.IOException {
+        JGitArtifactRepository repo = new JGitArtifactRepository(dir);
+        // A project's own .gitignore — the recurring offender is a per-project scratch dir like
+        // backend/.data that no static denylist could anticipate.
+        repo.write(new WriteRequest("t1", "a", "m", List.of(
+                new FileChange(".gitignore", "backend/.data/\nnode_modules/\n"),
+                new FileChange("backend/app.js", "code"))));
+        // Generated/scratch files that are NOT committed but sit on disk under ignored dirs.
+        java.nio.file.Files.createDirectories(dir.resolve("backend/.data/uploads/x"));
+        java.nio.file.Files.writeString(dir.resolve("backend/.data/app.db"), "sqlite");
+        java.nio.file.Files.writeString(dir.resolve("backend/.data/uploads/x/source.mp3"), "bytes");
+        java.nio.file.Files.createDirectories(dir.resolve("node_modules/dep"));
+        java.nio.file.Files.writeString(dir.resolve("node_modules/dep/index.js"), "vendored");
+
+        List<String> files = repo.list("");
+
+        assertTrue(files.contains("backend/app.js"));
+        assertTrue(files.contains(".gitignore"));
+        assertFalse(files.stream().anyMatch(f -> f.startsWith("backend/.data/")),
+                "gitignored scratch dir must not appear in the listing");
+        assertFalse(files.stream().anyMatch(f -> f.startsWith("node_modules/")),
+                "gitignored dependency dir must not appear in the listing");
+    }
+
+    @Test
     void reopensExistingRepository() {
         new JGitArtifactRepository(dir).write(new WriteRequest("t", "a", "m",
                 List.of(new FileChange("x.txt", "hi"))));

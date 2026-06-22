@@ -18,6 +18,22 @@ agents:
       max-output-tokens: 4096
       temperature: 0.4
 
+    phase-planner:
+      role: PHASE_PLANNER
+      model: opus
+      prompt-file: prompts/phase-planner.md
+      capabilities: [DECOMPOSE_TASKS]
+      max-output-tokens: 2048
+      temperature: 0.3
+
+    skill-smith:
+      role: SKILL_SMITH
+      model: opus
+      prompt-file: prompts/skill-smith.md
+      capabilities: [MARKET_RESEARCH]   # reuses the web-research capability to study a domain
+      max-output-tokens: 4096
+      temperature: 0.3
+
     prompt-engineer:
       role: PROMPT_ENGINEER
       model: sonnet
@@ -75,6 +91,7 @@ agents:
       role: BACKEND_DEVELOPER
       model: sonnet            # Opus/Sonnet configurable — switch here per cost/quality needs.
       prompt-file: prompts/backend-developer.md
+      skills: [runtime-verification]
       capabilities: [WRITE_CODE, EXECUTE_TOOLS]
       max-output-tokens: 8192
       temperature: 0.1
@@ -83,7 +100,7 @@ agents:
       role: FRONTEND_DEVELOPER
       model: sonnet
       prompt-file: prompts/frontend-developer.md
-      skills: [accessibility, modern-ui]
+      skills: [accessibility, modern-ui, runtime-verification]
       capabilities: [WRITE_CODE, EXECUTE_TOOLS]
       max-output-tokens: 8192
       temperature: 0.1
@@ -100,7 +117,17 @@ agents:
       role: QA_ENGINEER
       model: sonnet
       prompt-file: prompts/qa-engineer.md
+      skills: [runtime-verification]
       capabilities: [RUN_TESTS, REVIEW_CODE, EXECUTE_TOOLS]
+      max-output-tokens: 4096
+      temperature: 0.2
+
+    runtime-verifier:
+      role: RUNTIME_VERIFIER
+      model: sonnet
+      prompt-file: prompts/runtime-verifier.md
+      skills: [runtime-verification]
+      capabilities: [RUN_TESTS, EXECUTE_TOOLS]
       max-output-tokens: 4096
       temperature: 0.2
 

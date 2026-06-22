@@ -14,6 +14,9 @@ import com.orchestration.metrics.MetricsCalculator;
 import com.orchestration.metrics.MetricsStore;
 import com.orchestration.metrics.RoleMetrics;
 import com.orchestration.metrics.RunMetrics;
+import com.orchestration.artifact.JGitArtifactRepository;
+import com.orchestration.phase.PhasePlan;
+import com.orchestration.phase.PhasePlanStore;
 
 import java.nio.file.Path;
 import java.time.Instant;
@@ -63,6 +66,9 @@ public class OrchestrationMcpService {
     // records once.
     private final Set<String> metricsRecorded = ConcurrentHashMap.newKeySet();
     private final Set<String> lessonsRecorded = ConcurrentHashMap.newKeySet();
+    // Projects whose in-progress phase has been marked done for this run, so a repeated DONE poll
+    // advances the roadmap once.
+    private final Set<String> phaseMarked = ConcurrentHashMap.newKeySet();
 
     private volatile String activeProjectId;
     // taskId -> rememberProject, for one-off "explain a prebuilt project" tasks (not engine tasks).
@@ -159,6 +165,28 @@ public class OrchestrationMcpService {
                     auditLog.forProject(activeProjectId), activeProjectId, state));
         } catch (RuntimeException e) {
             metricsRecorded.remove(activeProjectId); // allow a later retry
+        }
+    }
+
+    /**
+     * On a successful finish, mark this run's in-progress phase DONE in the committed roadmap — once
+     * per project — so the next session sees it completed and builds the next pending phase. Best-effort
+     * and a no-op for non-phased projects (no roadmap on disk); never breaks the loop.
+     */
+    private void markActivePhaseDone() {
+        if (workspaces == null || activeProjectId == null || !phaseMarked.add(activeProjectId)) {
+            return;
+        }
+        try {
+            PhasePlanStore store = new PhasePlanStore(workspaces.get(activeProjectId).repository());
+            Optional<PhasePlan> plan = store.load();
+            if (plan.isEmpty()) {
+                return; // not a phased project
+            }
+            plan.get().inProgress().ifPresent(p ->
+                    store.markStatus(p.number(), PhasePlan.Status.DONE, AgentRole.PHASE_PLANNER.name()));
+        } catch (RuntimeException e) {
+            phaseMarked.remove(activeProjectId); // allow a later retry
         }
     }
 
@@ -424,22 +452,72 @@ public class OrchestrationMcpService {
      */
     public Map<String, Object> start(String featureRequest, String projectName,
                                      boolean rememberProject, boolean retrospective) {
+        return start(featureRequest, projectName, rememberProject, retrospective, false);
+    }
+
+    /**
+     * Start a project, with {@code createNew} controlling name-collision behaviour: when false (default)
+     * and {@code projectName} already names an existing project folder, returns a choice prompt asking
+     * whether to edit it in place or build a separate fresh copy — instead of silently suffixing a
+     * {@code -2} folder. Pass {@code createNew=true} to confirm the fresh copy.
+     */
+    public Map<String, Object> start(String featureRequest, String projectName,
+                                     boolean rememberProject, boolean retrospective, boolean createNew) {
+        return start(featureRequest, projectName, rememberProject, retrospective, createNew, false);
+    }
+
+    /**
+     * Start a project, with {@code phased} enabling phase-based development for a big build: the Phase
+     * Planner first lays out an ordered roadmap (persisted in the repo so a later session knows what is
+     * done and pending), this run builds only phase 1, and each remaining phase is built later via
+     * {@code orchestrate_phases build=true}.
+     */
+    public Map<String, Object> start(String featureRequest, String projectName,
+                                     boolean rememberProject, boolean retrospective, boolean createNew,
+                                     boolean phased) {
         if (featureRequest == null || featureRequest.isBlank()) {
             return Map.of("error", "featureRequest is required");
         }
+        // Collision guard: a named build over an existing project used to silently fork a "-2" copy.
+        // Surface the conflict so the user chooses edit-in-place vs a deliberate fresh copy.
+        if (!createNew && workspaces != null && projectName != null && !projectName.isBlank()) {
+            Optional<java.nio.file.Path> existing = workspaces.existingForName(projectName);
+            if (existing.isPresent()) {
+                java.nio.file.Path dir = existing.get();
+                return Map.of(
+                        "needsChoice", true,
+                        "nextAction", "ASK_USER",
+                        "existingPath", dir.toString(),
+                        "message", "A project named '" + projectName + "' already exists at " + dir
+                                + ". Ask the user which they want, then call the matching tool: "
+                                + "(a) EDIT the existing code in place — call orchestrate_edit with project=\""
+                                + dir.getFileName() + "\" and their change request; or (b) build a SEPARATE "
+                                + "fresh copy — call orchestrate_start again with createNew=true. Do NOT "
+                                + "guess; silently creating a numbered copy was the old wrong behaviour.");
+            }
+        }
         Map<String, Object> options = new LinkedHashMap<>();
-        options.put("rememberProject", rememberProject);
+        options.put("rememberProject", rememberProject || phased); // phases need the cross-session brain
         if (projectName != null && !projectName.isBlank()) {
             options.put("projectName", projectName.trim());
+        }
+        if (phased) {
+            options.put("phased", true);
         }
         String projectId = launch(featureRequest, options, retrospective);
         if (projectId == null) {
             return Map.of("error", "timed out starting project");
         }
+        String phaseNote = phased
+                ? "This is a PHASE-BASED build: the Phase Planner laid out a roadmap (saved in the "
+                        + "project so a future session knows what's done/pending) and THIS run builds only "
+                        + "phase 1. After it finishes, build the next phase with orchestrate_phases "
+                        + "build=true, or view progress any time with orchestrate_phases. "
+                : "";
         return Map.of(
                 "projectId", projectId,
                 "nextAction", "CALL_NEXT",
-                "message", "Project started in " + projectDir() + ". Run the loop AUTONOMOUSLY: call "
+                "message", phaseNote + "Project started in " + projectDir() + ". Run the loop AUTONOMOUSLY: call "
                         + "orchestrate_next, act as the agent it returns, call orchestrate_submit, and "
                         + "repeat until nextAction is STOP. The team may pause to ask the USER clarifying "
                         + "questions or to confirm its understanding. These are answerable in BOTH the web "
@@ -497,6 +575,100 @@ public class OrchestrationMcpService {
                 "message", "Editing existing project at " + dir + ". The team will MODIFY the current "
                         + "code to satisfy your change request — run the loop AUTONOMOUSLY (orchestrate_next "
                         + "→ act → orchestrate_submit) until nextAction is STOP, exactly like a build.");
+    }
+
+    /**
+     * View or advance a project's phase roadmap. With {@code build=false} (default) it REPORTS the
+     * roadmap — what is done and what is pending — which is how a brand-new session learns where the
+     * project stands. With {@code build=true} it starts a run that builds the next pending phase (the
+     * team modifies the existing code, and the phase is marked done when the run finishes).
+     */
+    public Map<String, Object> phases(String project, boolean build) {
+        if (workspaces == null) {
+            return Map.of("error", "Phase-based development is only available under the per-project "
+                    + "workspace feature (mcp profile).");
+        }
+        if (project == null || project.isBlank()) {
+            return Map.of("error", "project (a name or path) is required");
+        }
+        List<java.nio.file.Path> matches = workspaces.resolveExisting(project);
+        if (matches.isEmpty()) {
+            return Map.of("nextAction", "STOP",
+                    "error", "No existing project matches '" + project + "'. Start a phased build with "
+                            + "orchestrate_start (phased=true), or pass the full path to its folder.");
+        }
+        if (matches.size() > 1) {
+            List<String> names = matches.stream().map(p -> p.getFileName().toString()).toList();
+            return Map.of("needsChoice", true, "candidates", names, "nextAction", "ASK_USER",
+                    "message", "Multiple projects match '" + project + "': " + String.join(", ", names)
+                            + ". Ask the user which one, then call orchestrate_phases again with the EXACT "
+                            + "folder name shown (or the full path).");
+        }
+        java.nio.file.Path dir = matches.get(0);
+        Optional<PhasePlan> plan = phaseStoreFor(dir).load();
+        if (plan.isEmpty()) {
+            return Map.of("nextAction", "STOP", "project", dir.getFileName().toString(),
+                    "message", "No phase plan for '" + dir.getFileName() + "'. It was not started as a "
+                            + "phased build. Use orchestrate_start with phased=true for a big project that "
+                            + "should be delivered phase by phase.");
+        }
+        return build ? buildNextPhase(dir, plan.get()) : reportPhases(dir, plan.get());
+    }
+
+    /** Cross-session awareness: report the roadmap with each phase's status. Read-only (STOP). */
+    private Map<String, Object> reportPhases(java.nio.file.Path dir, PhasePlan plan) {
+        List<Map<String, Object>> phaseList = new ArrayList<>();
+        for (PhasePlan.Phase p : plan.phases()) {
+            Map<String, Object> entry = new LinkedHashMap<>();
+            entry.put("number", p.number());
+            entry.put("title", p.title());
+            entry.put("description", p.description());
+            entry.put("status", p.status().name());
+            phaseList.add(entry);
+        }
+        Map<String, Object> result = new LinkedHashMap<>();
+        result.put("project", dir.getFileName().toString());
+        result.put("goal", plan.goal());
+        result.put("phases", phaseList);
+        result.put("summary", plan.summary());
+        result.put("allDone", plan.allDone());
+        result.put("nextAction", "STOP");
+        result.put("message", plan.allDone()
+                ? "All phases are complete. " + plan.summary()
+                : plan.summary() + ". Build the next pending phase with orchestrate_phases build=true.");
+        return result;
+    }
+
+    /** Start a run that builds the next pending phase; the planner advances the plan and scopes it. */
+    private Map<String, Object> buildNextPhase(java.nio.file.Path dir, PhasePlan plan) {
+        Optional<PhasePlan.Phase> next = plan.nextPending();
+        if (next.isEmpty()) {
+            return Map.of("nextAction", "STOP", "project", dir.getFileName().toString(),
+                    "message", "All phases are already complete — nothing to build. " + plan.summary());
+        }
+        PhasePlan.Phase phase = next.get();
+        Map<String, Object> options = new LinkedHashMap<>();
+        options.put("editDir", dir.toString());     // modify the existing code in place
+        options.put("rememberProject", true);
+        options.put("phaseContinue", true);          // signal: advance the persisted plan
+        String request = "Build phase " + phase.number() + ": " + phase.headline();
+        String projectId = launch(request, options, false);
+        if (projectId == null) {
+            return Map.of("error", "timed out starting the phase build");
+        }
+        return Map.of(
+                "projectId", projectId,
+                "nextAction", "CALL_NEXT",
+                "phase", phase.number(),
+                "message", "Building phase " + phase.number() + " of " + plan.phases().size() + " — "
+                        + phase.title() + ". The team modifies the existing project at " + dir + "; run "
+                        + "the loop AUTONOMOUSLY (orchestrate_next → act → orchestrate_submit) until STOP. "
+                        + "The phase is marked done in the roadmap when the run finishes.");
+    }
+
+    /** A phase-plan store over a resolved project directory (opens/initialises its Git repo). */
+    private PhasePlanStore phaseStoreFor(java.nio.file.Path dir) {
+        return new PhasePlanStore(new JGitArtifactRepository(dir));
     }
 
     /**
@@ -611,6 +783,7 @@ public class OrchestrationMcpService {
             return retrospectiveTask(state);
         }
         if ("DONE".equals(state)) {
+            markActivePhaseDone(); // advance the phase roadmap (no-op for non-phased projects)
             recordMetricsOnce(state);
             extractLessonsOnce(state);
             releaseActiveFollow(); // the run is over; the dashboard stops following it
@@ -729,6 +902,9 @@ public class OrchestrationMcpService {
         String state = currentState();
         boolean finished = "DONE".equals(state) || "FAILED".equals(state);
         if (finished) {
+            if ("DONE".equals(state)) {
+                markActivePhaseDone(); // advance the phase roadmap (no-op for non-phased projects)
+            }
             recordMetricsOnce(state);
             extractLessonsOnce(state);
             releaseActiveFollow(); // the run is over; the dashboard stops following it

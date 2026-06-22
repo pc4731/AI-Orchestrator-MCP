@@ -116,9 +116,17 @@ public class JsonRpcMcpServer {
                         + "review that emails you the team's friction with the orchestrator so you can "
                         + "improve it. ASK the user what to name the project and pass it as projectName "
                         + "(the folder it is created in); if they have no preference, omit it and it "
-                        + "defaults to a slug of the request.",
+                        + "defaults to a slug of the request. If projectName already exists, this returns "
+                        + "nextAction=ASK_USER (a choice between editing it in place via orchestrate_edit "
+                        + "or building a fresh copy); relay it, and only pass createNew=true once the user "
+                        + "confirms they want a separate new copy. For a LARGE, multi-feature project that "
+                        + "should be delivered incrementally, set phased=true: the Phase Planner lays out "
+                        + "an ordered roadmap (saved in the project so a future session knows what's "
+                        + "done/pending), and THIS run builds only phase 1 — build later phases with "
+                        + "orchestrate_phases (build=true).",
                 objSchema().put("featureRequest", "string").put("projectName", "string")
-                        .put("rememberProject", "boolean").put("retrospective", "boolean"),
+                        .put("rememberProject", "boolean").put("retrospective", "boolean")
+                        .put("createNew", "boolean").put("phased", "boolean"),
                 "featureRequest"));
         tools.add(tool("orchestrate_edit",
                 "Modify an EXISTING project (one already built under the workspace) rather than starting "
@@ -131,6 +139,17 @@ public class JsonRpcMcpServer {
                 objSchema().put("project", "string").put("changeRequest", "string")
                         .put("retrospective", "boolean"),
                 "project", "changeRequest"));
+        tools.add(tool("orchestrate_phases",
+                "View or advance a phased project's roadmap (projects started with phased=true). Call "
+                        + "with just project (its folder NAME or full PATH) to REPORT the roadmap — every "
+                        + "phase and whether it is done, in progress, or pending — which is how a new "
+                        + "session learns where the project stands. Call with build=true to start building "
+                        + "the next pending phase: the team modifies the existing code (run the loop like a "
+                        + "normal build until STOP), and the phase is marked done when the run finishes. If "
+                        + "needsChoice=true, several projects matched — ask the user and call again with the "
+                        + "exact name.",
+                objSchema().put("project", "string").put("build", "boolean"),
+                "project"));
         tools.add(tool("orchestrate_next",
                 "Get the next agent task (role, persona, instructions, responseSchema). You then BECOME "
                         + "that agent: produce its output per the schema and call orchestrate_submit with the "
@@ -179,10 +198,14 @@ public class JsonRpcMcpServer {
             case "orchestrate_start" -> service.start(args.path("featureRequest").asText(null),
                     args.path("projectName").asText(null),
                     args.path("rememberProject").asBoolean(false),
-                    args.path("retrospective").asBoolean(true));
+                    args.path("retrospective").asBoolean(true),
+                    args.path("createNew").asBoolean(false),
+                    args.path("phased").asBoolean(false));
             case "orchestrate_edit" -> service.edit(args.path("project").asText(null),
                     args.path("changeRequest").asText(null),
                     args.path("retrospective").asBoolean(true));
+            case "orchestrate_phases" -> service.phases(args.path("project").asText(null),
+                    args.path("build").asBoolean(false));
             case "orchestrate_next" -> service.next();
             case "orchestrate_submit" -> service.submit(args.path("taskId").asText(null), args.get("result"));
             case "orchestrate_explain" -> service.explain(args.path("path").asText(null),

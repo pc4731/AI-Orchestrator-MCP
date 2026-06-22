@@ -42,10 +42,40 @@ class McpAgentTest {
     }
 
     @Test
-    void uiDesignerGetsThemeAndTokenGuidance() {
+    void uiDesignerAsksTheUserForTheThemeBeforeProducingTokens() {
         String i = instructionsFor(AgentRole.UI_DESIGNER);
         assertTrue(i.toLowerCase().contains("theme"));
         assertTrue(i.contains("output.tokens"));
+        // The theme is now a user decision, not a default — the designer must ask first.
+        assertTrue(i.contains("INSUFFICIENT_INFORMATION"), "designer must pause to ask the theme");
+        assertTrue(i.contains("output.questions"));
+    }
+
+    @Test
+    void phasePlannerGetsRoadmapGuidance() {
+        String i = instructionsFor(AgentRole.PHASE_PLANNER);
+        assertTrue(i.toLowerCase().contains("phase"));
+        assertTrue(i.contains("output.phases"));
+    }
+
+    @Test
+    void skillSmithGetsResearchAndApprovalGuidance() {
+        String i = instructionsFor(AgentRole.SKILL_SMITH);
+        assertTrue(i.contains("output.skills"));
+        assertTrue(i.toLowerCase().contains("research"));
+        // Must allow returning nothing for ordinary projects, and route through approval.
+        assertTrue(i.toLowerCase().contains("empty"), "ordinary projects → no synthesized skill");
+        assertTrue(i.toLowerCase().contains("approve"));
+    }
+
+    @Test
+    void runtimeVerifierGetsBootAndProbeGuidance() {
+        String i = instructionsFor(AgentRole.RUNTIME_VERIFIER);
+        assertTrue(i.toLowerCase().contains("background"), "must start the app as a background process");
+        assertTrue(i.contains("Playwright"), "drives the UI in a real browser");
+        assertTrue(i.contains("output.checks"));
+        // Token discipline: programmatic assertions over screenshot-vision.
+        assertTrue(i.toLowerCase().contains("screenshot"));
     }
 
     @Test

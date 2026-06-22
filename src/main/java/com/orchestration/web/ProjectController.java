@@ -80,6 +80,9 @@ public class ProjectController {
     public SubmitResponse submit(@RequestBody SubmitRequest request) {
         OrchestrationEngine.ProjectHandle handle = engine.submit(new OrchestrationEngine.ProjectRequest(
                 request.featureRequest(), Map.of(), Optional.of(2_000_000L)));
+        // Record it as the active project so a browser refresh (or a second tab) can re-discover the
+        // running project via /api/active instead of losing the live view to client-side state reset.
+        activeProject.set(handle.projectId());
         return new SubmitResponse(handle.projectId(), handle.state().name());
     }
 
