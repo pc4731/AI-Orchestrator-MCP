@@ -191,6 +191,53 @@ public class OrchestrationMcpService {
     }
 
     /**
+     * If the run that just finished was one phase of a phased project AND more phases remain, start the
+     * NEXT phase automatically and return its CALL_NEXT response — so the autonomous loop rolls straight
+     * on through the roadmap instead of stopping after every phase (which made it look stuck and forced
+     * a manual orchestrate_phases call). Returns null when this is not a phased project or all phases
+     * are already done, so the caller falls through to the normal terminal handling.
+     */
+    private Map<String, Object> continueNextPhaseIfAny() {
+        if (workspaces == null || activeProjectId == null) {
+            return null;
+        }
+        Optional<String> dir = workspaces.directoryOf(activeProjectId);
+        if (dir.isEmpty()) {
+            return null;
+        }
+        try {
+            java.nio.file.Path path = java.nio.file.Path.of(dir.get());
+            Optional<PhasePlan> plan = phaseStoreFor(path).load();
+            if (plan.isEmpty() || plan.get().nextPending().isEmpty()) {
+                return null; // not phased, or every phase shipped
+            }
+            return buildNextPhase(path, plan.get()); // launches the next phase; sets it as active
+        } catch (RuntimeException e) {
+            return null; // never let auto-advance break the terminal handling
+        }
+    }
+
+    /** A closing note when a phased project has just finished its FINAL phase, else empty. */
+    private String allPhasesDoneNote() {
+        if (workspaces == null || activeProjectId == null) {
+            return "";
+        }
+        try {
+            Optional<String> dir = workspaces.directoryOf(activeProjectId);
+            if (dir.isEmpty()) {
+                return "";
+            }
+            Optional<PhasePlan> plan = phaseStoreFor(java.nio.file.Path.of(dir.get())).load();
+            if (plan.isPresent() && plan.get().allDone()) {
+                return " All " + plan.get().phases().size() + " phases are complete.";
+            }
+        } catch (RuntimeException ignored) {
+            // best-effort cosmetic note
+        }
+        return "";
+    }
+
+    /**
      * Mine this finished run for evidence-backed lesson PROPOSALS and park them in the inbox — once per
      * project. Nothing here changes agent behavior; proposals stay PENDING until the user approves them
      * via {@code orchestrate_review_lessons}. Best-effort; never breaks the loop.
@@ -783,14 +830,18 @@ public class OrchestrationMcpService {
             return retrospectiveTask(state);
         }
         if ("DONE".equals(state)) {
-            markActivePhaseDone(); // advance the phase roadmap (no-op for non-phased projects)
+            markActivePhaseDone(); // mark this phase done in the roadmap (no-op for non-phased projects)
             recordMetricsOnce(state);
             extractLessonsOnce(state);
+            Map<String, Object> nextPhase = continueNextPhaseIfAny();
+            if (nextPhase != null) {
+                return nextPhase; // phased build: roll straight into the next phase, keep the loop going
+            }
             releaseActiveFollow(); // the run is over; the dashboard stops following it
             return Map.of("status", state, "nextAction", "STOP",
                     "message", "Project DONE. Loop complete — summarize the result for the user. "
                             + "Generated code is committed in " + projectDir() + "; see RUN.md there for "
-                            + "how to run it.");
+                            + "how to run it." + allPhasesDoneNote());
         }
         if ("FAILED".equals(state) || "BLOCKED".equals(state)) {
             // BLOCKED means work is stuck (e.g. a build that couldn't be fixed left a task in review).
@@ -900,11 +951,22 @@ public class OrchestrationMcpService {
                             + "dashboard). Nothing to do — call orchestrate_next to continue.");
         }
         String state = currentState();
-        boolean finished = "DONE".equals(state) || "FAILED".equals(state);
-        if (finished) {
-            if ("DONE".equals(state)) {
-                markActivePhaseDone(); // advance the phase roadmap (no-op for non-phased projects)
+        if ("DONE".equals(state)) {
+            markActivePhaseDone(); // mark this phase done (no-op for non-phased projects)
+            recordMetricsOnce(state);
+            extractLessonsOnce(state);
+            Map<String, Object> nextPhase = continueNextPhaseIfAny();
+            if (nextPhase != null) {
+                return nextPhase; // phased build: roll straight into the next phase
             }
+            releaseActiveFollow();
+            return Map.of("accepted", true, "outcome", response.outcome().name(),
+                    "projectState", state, "nextAction", "STOP",
+                    "message", "Project DONE. Loop complete — the code is in " + projectDir()
+                            + ". Summarize for the user." + allPhasesDoneNote());
+        }
+        boolean failed = "FAILED".equals(state);
+        if (failed) {
             recordMetricsOnce(state);
             extractLessonsOnce(state);
             releaseActiveFollow(); // the run is over; the dashboard stops following it
@@ -913,10 +975,10 @@ public class OrchestrationMcpService {
                 "accepted", true,
                 "outcome", response.outcome().name(),
                 "projectState", state,
-                "nextAction", finished ? "STOP" : "CALL_NEXT",
-                "message", finished
-                        ? "Project " + state + ". Loop complete — the code is in " + projectDir()
-                                + ". Summarize for the user."
+                "nextAction", failed ? "STOP" : "CALL_NEXT",
+                "message", failed
+                        ? "Project FAILED — it is NOT successfully done. Inspect " + projectDir()
+                                + " and report the blocker to the user."
                         : "Recorded. Immediately call orchestrate_next for the next task — keep looping "
                                 + "autonomously until nextAction is STOP.");
     }

@@ -101,6 +101,11 @@ public class TeamLeadProjectPlanner implements ProjectPlanner {
         // An edit run targets an EXISTING project folder (orchestrate_edit). It always reads the prior
         // context so the team modifies the current code rather than rebuilding it from scratch.
         boolean editMode = isEdit(request);
+        // A phase-continuation run (orchestrate_phases build=true) is scoped to an already-agreed
+        // roadmap phase: it must NOT re-run market research, the BA clarification loop, or skill
+        // synthesis — re-asking the user stalls the run on a stale BA prompt and the scope is already
+        // settled. The prior project brain + the phase scope carry all the context it needs.
+        boolean phaseContinue = isPhaseContinue(request);
         // Opt-in: the project brain is only worth its cost for projects you'll continue across
         // sessions. It is OFF by default for fresh builds, but always on for edits.
         boolean rememberProject = rememberProject(request) || editMode;
@@ -117,18 +122,26 @@ public class TeamLeadProjectPlanner implements ProjectPlanner {
 
         // 1) Market Researcher studies comparable tools, their complaints, and recommends features —
         //    up front, so the questions the BA asks the user are informed by what the market shows.
-        String marketResearch = researchMarket(projectId, request, priorKnowledge);
+        //    Skipped on a phase continuation: the roadmap is already set.
+        String marketResearch = phaseContinue ? "" : researchMarket(projectId, request, priorKnowledge);
 
         // 2) Clarification loop: the BA drafts a spec, asks the user the open questions, folds the
         //    answers back in, and repeats until the understanding is confirmed (or the cap is hit).
-        Clarified clarified = clarifyRequirements(projectId, request, marketResearch, priorKnowledge);
+        //    Skipped on a phase continuation — re-asking the user is what stalled the run on the BA
+        //    prompt between phases; the phase scope + prior knowledge are enough to plan the slice.
+        Clarified clarified = phaseContinue
+                ? new Clarified("", "")
+                : clarifyRequirements(projectId, request, marketResearch, priorKnowledge);
         String specification = clarified.specification();
 
         // 2.4) Just-in-time skills: if this build needs specialised domain expertise the team has no
         //      skill for, the Skill Smith researches it and proposes a tight skill; the user approves
         //      it here, BEFORE any build agent is created, so the approved skill is on disk and every
-        //      downstream agent this run (and future runs) picks it up.
-        synthesizeSkills(projectId, request, specification, priorKnowledge);
+        //      downstream agent this run (and future runs) picks it up. Skipped on a phase
+        //      continuation (any needed skill was decided when the phased build started).
+        if (!phaseContinue) {
+            synthesizeSkills(projectId, request, specification, priorKnowledge);
+        }
 
         // 2.5) Phase-based development: for a big build the Phase Planner lays out an ordered roadmap
         //      (persisted in the repo so a future session knows what's done/pending); a continuation

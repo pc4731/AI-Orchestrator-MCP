@@ -571,6 +571,63 @@ class TeamLeadProjectPlannerTest {
     }
 
     @Test
+    void phaseContinuationRunSkipsMarketResearchAndBaClarification() {
+        // The bug: a phase-continuation run re-ran market research + the BA clarification loop, which
+        // parked a question and left the run "stuck on the BA prompt" between phases. A continuation
+        // must skip both — its scope is the already-agreed roadmap phase.
+        java.util.concurrent.atomic.AtomicInteger baCalls = new java.util.concurrent.atomic.AtomicInteger();
+        java.util.concurrent.atomic.AtomicInteger marketCalls = new java.util.concurrent.atomic.AtomicInteger();
+        Agent ba = new Agent() {
+            @Override public AgentId id() { return new AgentId("ba"); }
+            @Override public AgentRole role() { return AgentRole.BUSINESS_ANALYST; }
+            @Override public Set<Capability> capabilities() { return Set.of(Capability.ELICIT_REQUIREMENTS); }
+            @Override public boolean canHandle(Task task) { return true; }
+            @Override public Response handle(Request request, Context context) {
+                baCalls.incrementAndGet();
+                return new Response(Outcome.INSUFFICIENT_INFORMATION,
+                        Map.of("questions", List.of("Which auth provider?")),
+                        List.of(), Confidence.LOW, List.of(), Optional.empty());
+            }
+        };
+        Agent market = new Agent() {
+            @Override public AgentId id() { return new AgentId("mr"); }
+            @Override public AgentRole role() { return AgentRole.MARKET_RESEARCHER; }
+            @Override public Set<Capability> capabilities() { return Set.of(Capability.MARKET_RESEARCH); }
+            @Override public boolean canHandle(Task task) { return true; }
+            @Override public Response handle(Request request, Context context) {
+                marketCalls.incrementAndGet();
+                return new Response(Outcome.COMPLETED, Map.of("summary", "m"),
+                        List.of(), Confidence.HIGH, List.of(), Optional.empty());
+            }
+        };
+        Agent tl = teamLeadReturningOneTask();
+        AgentFactory factory = new AgentFactory() {
+            @Override public Agent create(AgentRole role) {
+                return switch (role) {
+                    case BUSINESS_ANALYST -> ba;
+                    case MARKET_RESEARCHER -> market;
+                    default -> tl;
+                };
+            }
+            @Override public boolean supports(AgentRole role) {
+                return role == AgentRole.BUSINESS_ANALYST || role == AgentRole.MARKET_RESEARCHER
+                        || role == AgentRole.TEAM_LEAD;
+            }
+            @Override public Set<AgentRole> supportedRoles() {
+                return Set.of(AgentRole.BUSINESS_ANALYST, AgentRole.MARKET_RESEARCHER, AgentRole.TEAM_LEAD);
+            }
+        };
+
+        OrchestrationEngine.ProjectRequest continuation = new OrchestrationEngine.ProjectRequest(
+                "Build phase 2: Auth", Map.of("phaseContinue", true), Optional.empty());
+        // A gateway is present (so a non-continuation run WOULD ask) — the skip must hold regardless.
+        new TeamLeadProjectPlanner(factory, null, gatewayAnswering("answer")).plan("p1", continuation);
+
+        assertEquals(0, baCalls.get(), "a phase continuation must not re-run the BA clarification");
+        assertEquals(0, marketCalls.get(), "a phase continuation must not re-run market research");
+    }
+
+    @Test
     void fallsBackToASingleTeamLeadTaskWhenNoTasksReturned() {
         Agent.Response response = new Agent.Response(Agent.Outcome.INSUFFICIENT_INFORMATION,
                 Map.of(), List.of(), Agent.Confidence.LOW, List.of(), Optional.of("too vague"));
