@@ -16,8 +16,12 @@ import java.util.regex.Pattern;
  * <p>Plaintext checklist on purpose: human-readable, diffable in Git, and machine-parseable. The
  * checkbox marker carries the status — {@code [ ]} pending, {@code [>]} in progress, {@code [x]}
  * done — so the file doubles as a progress report a person can skim.
+ *
+ * <p>{@code autonomous} records the user's choice (made at the start of phase 1) for how to advance:
+ * {@code true} rolls straight through every phase; {@code false} pauses for the user's approval
+ * before each new phase.
  */
-public record PhasePlan(String goal, List<Phase> phases) {
+public record PhasePlan(String goal, boolean autonomous, List<Phase> phases) {
 
     /** A phase's lifecycle state. The marker in the rendered checklist encodes this. */
     public enum Status {
@@ -66,11 +70,18 @@ public record PhasePlan(String goal, List<Phase> phases) {
     private static final Pattern PHASE_LINE =
             Pattern.compile("^- \\[(.)\\]\\s*(\\d+)\\.\\s*(.*)$");
     private static final Pattern GOAL_LINE = Pattern.compile("(?i)^goal:\\s*(.*)$");
+    private static final Pattern MODE_LINE = Pattern.compile("(?i)^mode:\\s*(.*)$");
 
     public PhasePlan {
         Objects.requireNonNull(phases, "phases");
         goal = goal == null ? "" : goal.strip();
         phases = List.copyOf(phases);
+    }
+
+    /** Convenience: a plan in the default (paused) mode — the user's choice is set later via
+     *  {@link #withAutonomous}. Keeps existing two-argument call sites working. */
+    public PhasePlan(String goal, List<Phase> phases) {
+        this(goal, false, phases);
     }
 
     /** Build a fresh plan from ordered (title, description) pairs: phase 1 IN_PROGRESS, rest PENDING. */
@@ -96,13 +107,18 @@ public record PhasePlan(String goal, List<Phase> phases) {
         return phases.stream().filter(p -> p.status() == Status.DONE).count();
     }
 
-    /** A new plan with the given phase number set to {@code status} (others unchanged). */
+    /** A new plan with the given phase number set to {@code status} (mode + other phases unchanged). */
     public PhasePlan withStatus(int number, Status status) {
         List<Phase> updated = new ArrayList<>(phases.size());
         for (Phase p : phases) {
             updated.add(p.number() == number ? p.withStatus(status) : p);
         }
-        return new PhasePlan(goal, updated);
+        return new PhasePlan(goal, autonomous, updated);
+    }
+
+    /** A copy with the advance mode set (true = roll through all phases; false = pause before each). */
+    public PhasePlan withAutonomous(boolean value) {
+        return new PhasePlan(goal, value, phases);
     }
 
     /** A one-line progress summary, e.g. "Phases: 1/3 done (next: Auth)". */
@@ -120,6 +136,7 @@ public record PhasePlan(String goal, List<Phase> phases) {
         if (!goal.isBlank()) {
             sb.append("Goal: ").append(goal).append("\n\n");
         }
+        sb.append("Mode: ").append(autonomous ? "autonomous" : "paused").append("\n\n");
         for (Phase p : phases) {
             sb.append("- [").append(p.status().marker()).append("] ")
                     .append(p.number()).append(". ").append(p.headline()).append('\n');
@@ -127,18 +144,25 @@ public record PhasePlan(String goal, List<Phase> phases) {
         return sb.toString();
     }
 
-    /** Parse the committed checklist back into a plan. Unparseable lines are ignored. */
+    /** Parse the committed checklist back into a plan. Unparseable lines are ignored. A missing
+     *  Mode line defaults to paused (the safe choice — never auto-advance without an explicit yes). */
     public static PhasePlan parse(String markdown) {
         if (markdown == null || markdown.isBlank()) {
             return new PhasePlan("", List.of());
         }
         String goal = "";
+        boolean autonomous = false;
         List<Phase> phases = new ArrayList<>();
         for (String raw : markdown.split("\n")) {
             String line = raw.strip();
             Matcher goalMatch = GOAL_LINE.matcher(line);
             if (goal.isBlank() && goalMatch.matches()) {
                 goal = goalMatch.group(1).strip();
+                continue;
+            }
+            Matcher modeMatch = MODE_LINE.matcher(line);
+            if (modeMatch.matches()) {
+                autonomous = modeMatch.group(1).strip().toLowerCase().startsWith("auto");
                 continue;
             }
             Matcher phaseMatch = PHASE_LINE.matcher(line);
@@ -156,7 +180,7 @@ public record PhasePlan(String goal, List<Phase> phases) {
                 phases.add(new Phase(number, title, description, status));
             }
         }
-        return new PhasePlan(goal, phases);
+        return new PhasePlan(goal, autonomous, phases);
     }
 
     /** Grounding text handed to the team: the roadmap with statuses so every agent sees the big

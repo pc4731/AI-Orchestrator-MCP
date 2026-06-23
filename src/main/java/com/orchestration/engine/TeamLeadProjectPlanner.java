@@ -614,8 +614,13 @@ public class TeamLeadProjectPlanner implements ProjectPlanner {
             if (planned == null || planned.phases().isEmpty()) {
                 return Phasing.none();
             }
+            // At the START of phase 1, ask the user how to advance: roll through every phase, or pause
+            // for their approval before each. The choice is persisted in the roadmap and honoured for
+            // the rest of the build (and future sessions).
+            boolean autonomous = askPhaseMode(projectId, planned);
             int first = planned.phases().get(0).number();
-            PhasePlan started = planned.withStatus(first, PhasePlan.Status.IN_PROGRESS);
+            PhasePlan started = planned.withAutonomous(autonomous)
+                    .withStatus(first, PhasePlan.Status.IN_PROGRESS);
             store.save(started, null, AgentRole.PHASE_PLANNER.name());
             return new Phasing(started.groundingText(), started.phases().get(0));
         } catch (RuntimeException e) {
@@ -627,6 +632,27 @@ public class TeamLeadProjectPlanner implements ProjectPlanner {
     private static boolean isPhased(OrchestrationEngine.ProjectRequest request) {
         Object flag = request.options().get("phased");
         return Boolean.TRUE.equals(flag) || "true".equalsIgnoreCase(String.valueOf(flag));
+    }
+
+    /**
+     * Ask the user, at the start of a phased build, how to advance between phases: build them ALL
+     * autonomously, or PAUSE for approval before each new phase. The answer is stored in the roadmap.
+     * Defaults to autonomous when no approval channel is wired (non-interactive runs).
+     */
+    private boolean askPhaseMode(String projectId, PhasePlan plan) {
+        if (clarifier == null) {
+            return true;
+        }
+        String q = "This is a " + plan.phases().size() + "-phase build:\n" + plan.groundingText()
+                + "\n\nHow should I proceed between phases? Reply 'autonomous' to build ALL phases "
+                + "straight through without stopping, or 'pause' to stop for your approval before each "
+                + "new phase.";
+        Optional<String> answer = clarifier.ask(projectId, List.of(q), "phase advance mode");
+        String a = answer.orElse("").toLowerCase();
+        boolean wantsPause = a.contains("pause") || a.contains("approv") || a.contains("review")
+                || a.contains("confirm") || a.contains("checkpoint") || a.contains("before each")
+                || a.contains("stop");
+        return !wantsPause; // default to autonomous unless they clearly ask to pause
     }
 
     /** True when this run continues a phased project's roadmap (orchestrate_phases build=true). */

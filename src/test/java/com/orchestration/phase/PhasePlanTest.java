@@ -76,6 +76,27 @@ class PhasePlanTest {
     }
 
     @Test
+    void renderParsePreservesTheAdvanceMode() {
+        PhasePlan auto = new PhasePlan("g", true, List.of(new Phase(1, "A", "", Status.PENDING)));
+        assertTrue(PhasePlan.parse(auto.render()).autonomous(), "autonomous mode round-trips");
+
+        PhasePlan paused = new PhasePlan("g", false, List.of(new Phase(1, "A", "", Status.PENDING)));
+        assertFalse(PhasePlan.parse(paused.render()).autonomous(), "paused mode round-trips");
+
+        // A legacy roadmap with no Mode line defaults to paused (never auto-advance without a yes).
+        assertFalse(PhasePlan.parse("# Phase Plan\n\n- [ ] 1. A").autonomous());
+    }
+
+    @Test
+    void withStatusAndWithAutonomousPreserveTheOtherField() {
+        PhasePlan plan = new PhasePlan("g", true, List.of(
+                new Phase(1, "A", "", Status.IN_PROGRESS), new Phase(2, "B", "", Status.PENDING)));
+        assertTrue(plan.withStatus(1, Status.DONE).autonomous(), "withStatus keeps the mode");
+        assertEquals("g", plan.withAutonomous(false).goal(), "withAutonomous keeps the goal");
+        assertFalse(plan.withAutonomous(false).autonomous());
+    }
+
+    @Test
     void parseToleratesEmptyOrJunk() {
         assertTrue(PhasePlan.parse("").phases().isEmpty());
         assertTrue(PhasePlan.parse("just some prose\nno checklist here").phases().isEmpty());

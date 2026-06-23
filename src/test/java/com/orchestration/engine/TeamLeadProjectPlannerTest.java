@@ -445,6 +445,37 @@ class TeamLeadProjectPlannerTest {
     }
 
     @Test
+    void phasedBuildAsksHowToAdvanceAndStoresTheChoice() {
+        AtomicReference<Map<String, String>> tlGrounding = new AtomicReference<>(Map.of());
+        ProjectWorkspaces workspaces =
+                new FileProjectWorkspaces(workspaceBase, true, ".project/knowledge.md");
+
+        // The user is asked at the start of phase 1 and chooses to pause between phases.
+        new TeamLeadProjectPlanner(phasePlannerAndTeamLead(tlGrounding), null,
+                gatewayAnswering("pause"), null, workspaces)
+                .plan("p1", new OrchestrationEngine.ProjectRequest(
+                        "build a big app", Map.of("phased", true), Optional.empty()));
+
+        PhasePlan saved = new PhasePlanStore(workspaces.get("p1").repository()).load().orElseThrow();
+        assertFalse(saved.autonomous(), "the user chose to review between phases — store paused mode");
+    }
+
+    @Test
+    void phasedBuildDefaultsToAutonomousWhenTheUserSaysSo() {
+        AtomicReference<Map<String, String>> tlGrounding = new AtomicReference<>(Map.of());
+        ProjectWorkspaces workspaces =
+                new FileProjectWorkspaces(workspaceBase, true, ".project/knowledge.md");
+
+        new TeamLeadProjectPlanner(phasePlannerAndTeamLead(tlGrounding), null,
+                gatewayAnswering("autonomous"), null, workspaces)
+                .plan("p1", new OrchestrationEngine.ProjectRequest(
+                        "build a big app", Map.of("phased", true), Optional.empty()));
+
+        PhasePlan saved = new PhasePlanStore(workspaces.get("p1").repository()).load().orElseThrow();
+        assertTrue(saved.autonomous(), "the user chose to roll straight through");
+    }
+
+    @Test
     void continuationRunAdvancesToTheNextPendingPhase() {
         AtomicReference<Map<String, String>> tlGrounding = new AtomicReference<>(Map.of());
         ProjectWorkspaces workspaces =

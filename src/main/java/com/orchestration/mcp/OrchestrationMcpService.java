@@ -207,11 +207,32 @@ public class OrchestrationMcpService {
         }
         try {
             java.nio.file.Path path = java.nio.file.Path.of(dir.get());
-            Optional<PhasePlan> plan = phaseStoreFor(path).load();
-            if (plan.isEmpty() || plan.get().nextPending().isEmpty()) {
-                return null; // not phased, or every phase shipped
+            Optional<PhasePlan> loaded = phaseStoreFor(path).load();
+            if (loaded.isEmpty()) {
+                return null; // not a phased project
             }
-            return buildNextPhase(path, plan.get()); // launches the next phase; sets it as active
+            PhasePlan plan = loaded.get();
+            Optional<PhasePlan.Phase> next = plan.nextPending();
+            if (next.isEmpty()) {
+                return null; // every phase shipped → fall through to the terminal "all done" message
+            }
+            if (plan.autonomous()) {
+                return buildNextPhase(path, plan); // roll straight on; launches + follows the new phase
+            }
+            // Paused mode (the user chose to review between phases): do NOT auto-launch. Tell the
+            // driver to confirm with the user, who then triggers the next phase explicitly.
+            PhasePlan.Phase phase = next.get();
+            return Map.of(
+                    "status", "PHASE_COMPLETE",
+                    "nextAction", "ASK_USER",
+                    "project", path.getFileName().toString(),
+                    "nextPhase", phase.number(),
+                    "message", "Phase " + plan.doneCount() + " of " + plan.phases().size()
+                            + " is done. Next up is phase " + phase.number() + ": " + phase.title()
+                            + ". You chose to REVIEW between phases — ask the USER whether to proceed. "
+                            + "If they say yes, call orchestrate_phases with project=\""
+                            + path.getFileName() + "\" and build=true to start it; if they want changes "
+                            + "or to stop, do that instead. Do NOT auto-continue.");
         } catch (RuntimeException e) {
             return null; // never let auto-advance break the terminal handling
         }
